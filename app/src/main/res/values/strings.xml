@@ -1,0 +1,10 @@
+<resources>
+    <string name="app_name">subconverter</string>
+
+    <!--
+      启动服务 / 加载页面失败时，直接渲染进那个唯一的 WebView 里的纯文本说明。
+      App 里已经没有任何原生控件显示它们了（只剩 logcat）。
+    -->
+    <string name="error_server_failed">内嵌转换服务启动失败</string>
+    <string name="error_page_failed">页面加载失败</string>
+</resources>

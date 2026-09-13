@@ -1,0 +1,4 @@
+<resources>
+    <!-- 深色模式。缘由见 values/themes.xml。 -->
+    <style name="Theme.Subconverter" parent="@android:style/Theme.DeviceDefault.NoActionBar" />
+</resources>

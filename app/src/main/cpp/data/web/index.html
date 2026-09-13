@@ -1,0 +1,810 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>subconv · 订阅转换</title>
+<style>
+  :root {
+    color-scheme: dark light;
+    --bg: #0e1116;
+    --panel: #161a22;
+    --panel-2: #1c2129;
+    --border: #262c38;
+    --text: #e7ebf2;
+    --muted: #97a1b2;
+    --accent: #4f8cff;
+    --accent-soft: #4f8cff22;
+    --ok: #2fbf71;
+    --warn: #e0a33e;
+    --err: #ef5f5f;
+    --mono: ui-monospace, SFMono-Regular, "Cascadia Mono", Consolas, "Liberation Mono", monospace;
+  }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --bg: #f4f6fa;
+      --panel: #ffffff;
+      --panel-2: #f7f9fc;
+      --border: #dde3ec;
+      --text: #1b2130;
+      --muted: #667085;
+      --accent-soft: #4f8cff18;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    padding: 22px clamp(14px, 3vw, 34px) 40px;
+    background: var(--bg);
+    color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", "Noto Sans SC", "Microsoft YaHei", sans-serif;
+  }
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 14px; flex-wrap: wrap; margin-bottom: 18px;
+  }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .logo {
+    width: 34px; height: 34px; border-radius: 10px; display: grid; place-items: center;
+    background: linear-gradient(140deg, var(--accent), #7d5cff); color: #fff;
+    font-size: 18px; font-weight: 700;
+  }
+  h1 { font-size: 20px; margin: 0; letter-spacing: .3px; }
+  .badge {
+    font: 12px/1 var(--mono); color: var(--muted); border: 1px solid var(--border);
+    background: var(--panel); border-radius: 999px; padding: 5px 9px;
+  }
+  .status { font-size: 13px; color: var(--muted); }
+  .status b { color: var(--ok); }
+  main { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.05fr); gap: 18px; align-items: start; }
+  @media (max-width: 1000px) { main { grid-template-columns: 1fr; } }
+  .panel {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 14px;
+    padding: 18px; min-width: 0;
+  }
+  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; }
+  h2:not(:first-child) { margin-top: 22px; }
+  textarea {
+    width: 100%; min-height: 132px; resize: vertical; padding: 12px;
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 10px; font: 13px/1.65 var(--mono);
+  }
+  textarea:focus, input:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+  .hint { font-size: 12.5px; color: var(--muted); margin: 8px 0 0; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+  .targets { display: grid; grid-template-columns: repeat(auto-fit, minmax(146px, 1fr)); gap: 8px; }
+  .targets label {
+    display: flex; flex-direction: column; gap: 2px; cursor: pointer;
+    border: 1px solid var(--border); border-radius: 10px; padding: 11px 12px;
+    background: var(--panel-2); transition: border-color .15s, background .15s;
+  }
+  .targets label:hover { border-color: var(--accent); }
+  .targets input { position: absolute; opacity: 0; pointer-events: none; }
+  .targets label:has(input:checked) { border-color: var(--accent); background: var(--accent-soft); }
+  .targets .name { font-weight: 600; }
+  .targets .desc { font-size: 12px; color: var(--muted); }
+  details { margin-top: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--panel-2); }
+  summary { cursor: pointer; padding: 11px 13px; font-size: 13px; color: var(--muted); user-select: none; }
+  .opts { padding: 4px 13px 14px; display: grid; gap: 12px; }
+  .opt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 8px 14px; }
+  .opt { display: flex; align-items: center; gap: 8px; font-size: 13.5px; }
+  .opt input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+  .field { display: grid; gap: 5px; font-size: 12.5px; color: var(--muted); }
+  .field input {
+    background: var(--panel); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 10px; font: 12.5px var(--mono);
+  }
+  /* 订阅名称：刻意放在高级选项之外 */
+  .name-row { display: grid; gap: 6px; }
+  .name-row input {
+    background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+    border-radius: 8px; padding: 9px 11px; font: 13px var(--mono);
+  }
+  .name-hint { font-size: 12px; color: var(--muted); }
+  /* 勾上「输出 rules」才出现的分流规则集复选 */
+  .rulesets { border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; background: var(--panel); }
+  .rulesets[hidden] { display: none; }
+  .rulesets-head { font-size: 12px; color: var(--muted); margin-bottom: 9px; }
+  .rulesets-head b { color: var(--text); font-size: 13px; font-weight: 600; }
+  .rulesets-list { display: grid; grid-template-columns: repeat(auto-fit, minmax(184px, 1fr)); gap: 8px 14px; }
+  .ruleset { display: flex; align-items: center; gap: 7px; font-size: 13px; cursor: pointer; }
+  .ruleset input[type="checkbox"] { width: 16px; height: 16px; accent-color: var(--accent); }
+  .ruleset .tag {
+    font: 10.5px/1 var(--mono); padding: 3px 5px; border-radius: 4px;
+    border: 1px solid var(--border); color: var(--muted);
+  }
+  .ruleset .tag[data-policy="DIRECT"] { color: var(--ok); }
+  .ruleset .tag[data-policy="REJECT"] { color: var(--err); }
+  .ruleset .tag[data-region="国外"] { color: var(--ok); }
+  .ruleset .tag[data-region="国内"] { color: var(--warn); }
+  .dns-custom { margin-top: 10px; }
+  button {
+    font: inherit; cursor: pointer; border-radius: 9px; padding: 9px 14px;
+    border: 1px solid var(--border); background: var(--panel-2); color: var(--text);
+    transition: border-color .15s, opacity .15s;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary {
+    width: 100%; margin-top: 16px; border: none; color: #fff; font-weight: 600;
+    background: linear-gradient(135deg, var(--accent), #7d5cff); padding: 12px;
+  }
+  button.primary kbd {
+    font: 11px var(--mono); background: #ffffff2b; border-radius: 5px; padding: 2px 5px; margin-left: 3px;
+  }
+  .result-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .result-head .actions { display: flex; gap: 8px; }
+  .result-head button { padding: 6px 11px; font-size: 13px; }
+  .chips { display: flex; gap: 7px; flex-wrap: wrap; margin: 12px 0 10px; }
+  .chip {
+    font: 12px var(--mono); border: 1px solid var(--border); background: var(--panel-2);
+    color: var(--muted); border-radius: 999px; padding: 4px 9px;
+  }
+  .chip b { color: var(--text); font-weight: 600; }
+  pre {
+    margin: 0; background: var(--panel-2); border: 1px solid var(--border); border-radius: 10px;
+    padding: 13px; font: 12.5px/1.6 var(--mono); white-space: pre; overflow: auto;
+    max-height: 58vh; min-height: 190px; tab-size: 2;
+  }
+  pre .placeholder { color: var(--muted); }
+  .warnings { margin: 0 0 10px; padding: 0; list-style: none; display: grid; gap: 5px; }
+  .warnings li {
+    font-size: 12.5px; color: var(--warn); background: #e0a33e14;
+    border: 1px solid #e0a33e3d; border-radius: 8px; padding: 7px 10px;
+  }
+  .alert {
+    display: none; margin-bottom: 14px; border-radius: 10px; padding: 11px 13px; font-size: 13.5px;
+    color: var(--err); background: #ef5f5f14; border: 1px solid #ef5f5f3d; white-space: pre-wrap;
+  }
+  .alert.show { display: block; }
+  .api { margin-top: 16px; }
+  .api label { font-size: 12.5px; color: var(--muted); display: block; margin-bottom: 6px; }
+  .apilink { display: flex; gap: 8px; }
+  .apilink input {
+    flex: 1; min-width: 0; background: var(--panel-2); color: var(--muted);
+    border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; font: 12px var(--mono);
+  }
+  footer { margin-top: 26px; color: var(--muted); font-size: 12.5px; text-align: center; }
+  code { font: 12px var(--mono); background: var(--panel-2); border: 1px solid var(--border); border-radius: 5px; padding: 1px 5px; }
+</style>
+</head>
+<body>
+<header>
+  <div class="brand">
+    <span class="logo">⇄</span>
+    <h1>subconv</h1>
+    <span class="badge" id="version">v…</span>
+  </div>
+  <div class="status" id="status">正在连接本地服务…</div>
+</header>
+
+<div class="alert" id="alert" role="alert"></div>
+
+<main>
+  <section class="panel">
+    <h2>输入</h2>
+    <textarea id="input" spellcheck="false" placeholder="每行一个订阅链接，例如：&#10;https://example.com/api/v1/client/subscribe?token=xxx&#10;&#10;也可以直接粘贴分享链接（ss:// vmess:// vless:// trojan:// …）、Base64 订阅、Clash YAML 或 JSON 版 Clash 配置"></textarea>
+    <p class="hint">
+      <b>独占一行</b>且<b>顶格</b>的 <b>http(s)://</b> 行按订阅链接抓取（走服务端代理设置）；
+      其余行<b>原样保留缩进</b>合并成一段<b>订阅内容</b>直接解析 ——
+      分享链接列表、Base64 包裹、Clash YAML（含 JSON 版）都自动识别。
+    </p>
+    <div class="row">
+      <button id="example" type="button">填入示例</button>
+      <button id="clear" type="button">清空</button>
+    </div>
+
+    <h2>订阅名称</h2>
+    <div class="name-row">
+      <input id="opt-name" placeholder="例如：我的机场（留空则用 subconv-<目标>）" spellcheck="false">
+      <span class="name-hint">作为下载文件名（按目标自动补 .yaml / .json / .txt）与配置首行注释；
+        客户端用 <code>/sub</code> 订阅时，一般会拿它当订阅名。</span>
+    </div>
+
+    <h2>目标</h2>
+    <div class="targets" id="targets">
+      <label><input type="radio" name="target" value="clash" checked><span class="name">Clash</span><span class="desc">mihomo / meta</span></label>
+      <label><input type="radio" name="target" value="xray"><span class="name">Xray</span><span class="desc">v2ray JSON</span></label>
+      <label><input type="radio" name="target" value="singbox"><span class="name">sing-box</span><span class="desc">1.x JSON</span></label>
+      <label><input type="radio" name="target" value="links"><span class="name">v2rayNG 链接</span><span class="desc">每行一条分享链接</span></label>
+      <label><input type="radio" name="target" value="base64"><span class="name">v2rayNG 订阅</span><span class="desc">base64，填订阅地址</span></label>
+      <label><input type="radio" name="target" value="v2rayn"><span class="name">v2rayNG 完整</span><span class="desc">含 http，https 仅 v2rayN</span></label>
+    </div>
+    <p class="hint">
+      <b>链接</b>：复制后到 v2rayNG「从剪贴板导入」；<b>订阅</b>：把生成的 API 地址填进「订阅设置」。
+      这两者都是通用分享链接，<b>http 代理没有链接形态会被跳过</b>；
+      <b>完整</b>用 v2rayN 的 <code>v2rayn://</code> 格式，能把 http 节点也带进去（只有 v2rayN / v2rayNG 认）。
+      注意带 TLS 的 http（https 代理）<b>只有 v2rayN 能生效</b>，v2rayNG 的 http 出站会忽略 TLS。
+    </p>
+
+    <details id="advanced">
+      <summary>高级选项</summary>
+      <div class="opts">
+        <div class="opt-grid">
+          <label class="opt"><input type="checkbox" id="opt-emoji" checked>分组 emoji</label>
+          <label class="opt"><input type="checkbox" id="opt-udp" checked>启用 UDP</label>
+          <label class="opt"><input type="checkbox" id="opt-dedup" checked>去重</label>
+          <label class="opt"><input type="checkbox" id="opt-rules" checked>输出 rules</label>
+          <label class="opt"><input type="checkbox" id="opt-sort">按名称排序</label>
+          <label class="opt"><input type="checkbox" id="opt-tfo">TCP Fast Open</label>
+          <label class="opt"><input type="checkbox" id="opt-ipv6" checked>IPv6</label>
+          <label class="opt" title="连接每个节点取对端证书 SHA256 指纹。Xray 25+ 移除了 allowInsecure，机场那种「证书与 SNI 对不上」的节点只能靠指纹放行，否则客户端里全是 -1"><input type="checkbox" id="opt-probecert">探测证书指纹</label>
+          <label class="opt"><input type="checkbox" id="opt-legacy">原版 Clash 语法</label>
+        </div>
+        <!-- 勾上「输出 rules」才出现：可选分流规则集。
+             列表由 GET /api/rulesets 提供（C++ 侧是唯一真源，避免两边写死不同步）。 -->
+        <div class="rulesets" id="rulesets" hidden>
+          <div class="rulesets-head">
+            <b>分流规则集</b> · 勾中即展开成 rules；拒绝类优先于直连类，其余按顺序匹配。
+            目前只对 <b>Clash / mihomo</b> 目标生效。
+          </div>
+          <div class="rulesets-list" id="rulesets-list"></div>
+        </div>
+
+        <!-- DNS：写进 clash 的 dns.nameserver；列表同样来自后端（GET /api/dns） -->
+        <div class="rulesets" id="dnsblock">
+          <div class="rulesets-head">
+            <b>DNS</b> · 写进 clash 的 <code>dns.nameserver</code>；国外优先，
+            国内解析器在跨境场景容易被污染，不推荐。目前只对 <b>Clash / mihomo</b> 目标生效。
+          </div>
+          <div class="rulesets-list" id="dns-list"></div>
+          <label class="field dns-custom">自定义 DNS（逗号分隔，可填 IP 或 https://&lt;IP&gt;/dns-query）
+            <input id="opt-dnscustom" placeholder="例如 122.112.208.1 或 https://1.1.1.1/dns-query"
+                   spellcheck="false">
+          </label>
+        </div>
+        <div class="opt-grid">
+          <label class="field">HTTP/SOCKS5 代理
+            <input id="opt-proxy" placeholder="http://127.0.0.1:10808" spellcheck="false">
+          </label>
+          <label class="field">User-Agent
+            <input id="opt-ua" placeholder="clash-verge/v2.0.0" spellcheck="false">
+          </label>
+          <label class="field">超时（秒）
+            <input id="opt-timeout" type="number" min="1" placeholder="20">
+          </label>
+          <label class="field">重试次数
+            <input id="opt-retries" type="number" min="0" placeholder="2">
+          </label>
+        </div>
+      </div>
+    </details>
+
+    <button class="primary" id="run" type="button">转换<kbd>Ctrl</kbd><kbd>Enter</kbd></button>
+  </section>
+
+  <section class="panel">
+    <div class="result-head">
+      <h2 style="margin:0">结果</h2>
+      <div class="actions">
+        <button id="copy" type="button" disabled>复制</button>
+        <button id="download" type="button" disabled>下载</button>
+      </div>
+    </div>
+    <div class="chips" id="meta"></div>
+    <ul class="warnings" id="warnings"></ul>
+    <pre id="output"><span class="placeholder">转换结果会显示在这里。</span></pre>
+    <div class="api">
+      <label>subconverter 兼容 API —— 把这个地址填到客户端里，以后直接更新订阅</label>
+      <div class="apilink">
+        <input id="apilink" readonly spellcheck="false" value="转换后自动生成">
+        <button id="copyapi" type="button">复制</button>
+      </div>
+    </div>
+  </section>
+</main>
+
+<footer>
+  subconv · 本地转换，订阅链接不经过第三方服务器 ·
+  命令行等价用法 <code>subconv -i &lt;订阅&gt; -t clash -o config.yaml</code>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  var $ = function (id) { return document.getElementById(id); };
+  var last = null;
+
+  // ---- 示例：4 个协议各一个，覆盖 reality / ws / grpc -------------------------
+  var EXAMPLE = [
+    "ss://YWVzLTI1Ni1nY206c3NwYXNz@ss.example.com:8443#🇸🇬 新加坡 01",
+    "vmess://eyJ2IjoiMiIsInBzIjoiVk1lc3MtV1MtVExTIiwiYWRkIjoidm0uZXhhbXBsZS5jb20iLCJwb3J0IjoiNDQzIiwiaWQiOiJiODMxMzgxZC02MzI0LTRkNTMtYWQ0Zi04Y2RhNDhiMzA4MTEiLCJhaWQiOiIwIiwic2N5IjoiYXV0byIsIm5ldCI6IndzIiwidHlwZSI6Im5vbmUiLCJob3N0Ijoidm0uZXhhbXBsZS5jb20iLCJwYXRoIjoiL3Ztd3MiLCJ0bHMiOiJ0bHMiLCJzbmkiOiJ2bS5leGFtcGxlLmNvbSIsImFscG4iOiJoMixodHRwLzEuMSIsImZwIjoiY2hyb21lIn0=",
+    "vless://b831381d-6324-4d53-ad4f-8cda48b30811@vl2.example.com:443?encryption=none&security=reality&sni=www.microsoft.com&fp=chrome&pbk=YQfPqk3nJP8vT1sBcDeFgHiJkLmNoPqRsTuVwXyZ012&sid=0123abcd&type=tcp&flow=xtls-rprx-vision#🇯🇵 日本 01",
+    "trojan://tjpw@tj.example.com:443?sni=tj.example.com&type=ws&path=%2Ftjws&host=tj.example.com#🇺🇸 美国 01"
+  ].join("\n");
+
+  // ---- 与后端约定的选项 -------------------------------------------------------
+  function currentTarget() {
+    var picked = document.querySelector('input[name="target"]:checked');
+    return picked ? picked.value : "clash";
+  }
+
+  // ---- 分流规则集：列表来自 /api/rulesets -------------------------------------
+  var RULESET_IDS = null;       // null = 目录还没拿到 → 不下发 rulesets，用服务端默认
+
+  // 链接里的 ?rulesets= / ?dns= 必须在目录渲染**之前**就解析好；空串 [] 表示「一个都不要」，
+  // 所以不能和「没指定」共用 null/空值的真值判断。
+  function queryList(name) {
+    var params = new URLSearchParams(location.search);
+    if (!params.has(name)) return null;
+    return params.get(name).split(",")
+      .map(function (item) { return item.trim(); })
+      .filter(Boolean);
+  }
+  var rulesetPreset = queryList("rulesets");
+  var dnsPreset = queryList("dns");
+
+  function rulesetBoxes() {
+    return Array.prototype.slice.call(
+      document.querySelectorAll("#rulesets-list input[data-ruleset]"));
+  }
+
+  function selectedRuleSets() {
+    return rulesetBoxes().filter(function (box) { return box.checked; })
+      .map(function (box) { return box.getAttribute("data-ruleset"); });
+  }
+
+  function syncRulesetsVisibility() {
+    $("rulesets").hidden = !$("opt-rules").checked || RULESET_IDS === null;
+  }
+
+  function renderRulesets(catalogue, preset) {
+    var list = $("rulesets-list");
+    list.innerHTML = "";
+    RULESET_IDS = [];
+    catalogue.forEach(function (item) {
+      var label = document.createElement("label");
+      label.className = "ruleset";
+      label.title = item.note;
+
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.setAttribute("data-ruleset", item.id);
+      box.checked = preset.indexOf(item.id) >= 0;
+
+      var name = document.createElement("span");
+      name.textContent = item.name;
+
+      var tag = document.createElement("span");
+      tag.className = "tag";
+      tag.setAttribute("data-policy", item.policy);
+      tag.textContent = item.policy === "REJECT" ? "拒绝" : "直连";
+
+      label.appendChild(box);
+      label.appendChild(name);
+      label.appendChild(tag);
+      list.appendChild(label);
+      RULESET_IDS.push(item.id);
+    });
+    syncRulesetsVisibility();
+  }
+
+  /** 拉取规则集目录；失败就保持隐藏并沿用服务端默认，绝不阻塞转换。 */
+  function loadRulesets() {
+    return fetch("/api/rulesets")
+      .then(function (response) { return response.json(); })
+      .then(function (data) {
+        if (!data || !data.rulesets || !data.rulesets.length) return;
+        var saved = null;
+        try {
+          var state = JSON.parse(localStorage.getItem("subconv.state") || "null");
+          if (state && Array.isArray(state.rulesets)) saved = state.rulesets;
+        } catch (e) { /* localStorage 不可用时忽略 */ }
+        // 链接指定 > 上次记忆 > 服务端默认；注意 rulesetPreset 为空数组时不能回退
+        var preset = rulesetPreset !== null ? rulesetPreset : (saved || data["default"] || []);
+        renderRulesets(data.rulesets, preset);
+      })
+      .catch(function () { /* 拿不到目录就不显示，仍按服务端默认生成 rules */ });
+  }
+
+  // ---- DNS 预设：列表来自 /api/dns --------------------------------------------
+  var DNS_IDS = null;           // null = 目录还没拿到 → 不下发 dns，用服务端默认
+
+  function dnsBoxes() {
+    return Array.prototype.slice.call(
+      document.querySelectorAll("#dns-list input[data-dns]"));
+  }
+
+  /** 勾选的预设 id + 自定义框里的字面地址（服务端两者都认）。 */
+  function selectedDns() {
+    var picked = dnsBoxes().filter(function (box) { return box.checked; })
+      .map(function (box) { return box.getAttribute("data-dns"); });
+    var custom = $("opt-dnscustom").value.split(",")
+      .map(function (item) { return item.trim(); })
+      .filter(Boolean);
+    custom.forEach(function (item) {
+      if (picked.indexOf(item) < 0) picked.push(item);
+    });
+    return picked;
+  }
+
+  function renderDns(catalogue, preset) {
+    var list = $("dns-list");
+    list.innerHTML = "";
+    DNS_IDS = [];
+    catalogue.forEach(function (item) {
+      var label = document.createElement("label");
+      label.className = "ruleset";
+      label.title = item.note + "  →  " + item.v4.join(" / ") +
+        (item.v6.length ? "  (+ IPv6: " + item.v6.join(" / ") + ")" : "");
+
+      var box = document.createElement("input");
+      box.type = "checkbox";
+      box.setAttribute("data-dns", item.id);
+      box.checked = preset.indexOf(item.id) >= 0;
+
+      var name = document.createElement("span");
+      name.textContent = item.name;
+
+      var tag = document.createElement("span");
+      tag.className = "tag";
+      tag.setAttribute("data-region", item.region);
+      tag.textContent = item.region;
+
+      label.appendChild(box);
+      label.appendChild(name);
+      label.appendChild(tag);
+      list.appendChild(label);
+      DNS_IDS.push(item.id);
+    });
+    // 目录里没有的 token（就是字面地址）落到自定义框
+    var leftovers = preset.filter(function (token) {
+      return catalogue.every(function (item) { return item.id !== token; });
+    });
+    if (leftovers.length) $("opt-dnscustom").value = leftovers.join(", ");
+  }
+
+  function loadDns() {
+    return fetch("/api/dns")
+      .then(function (response) { return response.json(); })
+      .then(function (data) {
+        if (!data || !data.presets || !data.presets.length) return;
+        var saved = null;
+        try {
+          var state = JSON.parse(localStorage.getItem("subconv.state") || "null");
+          if (state && Array.isArray(state.dns)) saved = state.dns;
+        } catch (e) { /* localStorage 不可用时忽略 */ }
+        var preset = dnsPreset !== null ? dnsPreset : (saved || data["default"] || []);
+        renderDns(data.presets, preset);
+      })
+      .catch(function () { /* 拿不到目录就不显示，仍按服务端默认写 nameserver */ });
+  }
+
+  function collectOptions() {
+    var options = {
+      emoji: $("opt-emoji").checked,
+      udp: $("opt-udp").checked,
+      dedup: $("opt-dedup").checked,
+      rules: $("opt-rules").checked,
+      sort: $("opt-sort").checked,
+      tfo: $("opt-tfo").checked,
+      ipv6: $("opt-ipv6").checked,
+      clash_legacy: $("opt-legacy").checked,
+      probe_cert: $("opt-probecert").checked
+    };
+    // 目录没加载成功时留空（JSON.stringify 会丢掉 undefined 键）→ 用服务端默认
+    if (RULESET_IDS !== null) options.rulesets = selectedRuleSets();
+    if (DNS_IDS !== null) options.dns = selectedDns();
+    return options;
+  }
+
+  function collectFetch() {
+    var fetchOptions = {};
+    if ($("opt-proxy").value.trim()) fetchOptions.proxy = $("opt-proxy").value.trim();
+    if ($("opt-ua").value.trim()) fetchOptions.ua = $("opt-ua").value.trim();
+    if ($("opt-timeout").value) fetchOptions.timeout = Number($("opt-timeout").value);
+    if ($("opt-retries").value !== "") fetchOptions.retries = Number($("opt-retries").value);
+    return fetchOptions;
+  }
+
+  /** 独占一行、行首无缩进的裸 http(s) 链接 → 订阅链接；其余行**原样保留**（含缩进）→ 订阅内容。
+   *  注意：这里绝不能把 trim 过的行拼回内容 —— YAML / JSON 靠行首缩进表达结构，
+   *  整段去缩进会把 Clash YAML 变成「yaml-cpp: end of map not found」。 */
+  function splitInput(text) {
+    var sources = [], others = [];
+    text.split(/\r?\n/).forEach(function (line) {
+      var t = line.trim();
+      var bareUrl = t !== "" && line === line.replace(/^[ \t]+/, "") && /^https?:\/\/\S+$/i.test(t);
+      if (bareUrl) { sources.push(t); return; }
+      others.push(line);
+    });
+    return { sources: sources, content: others.join("\n") };
+  }
+
+  // ---- 视图 ------------------------------------------------------------------
+  function setStatus(html) { $("status").innerHTML = html; }
+
+  function showError(message) {
+    $("alert").textContent = message;
+    $("alert").classList.add("show");
+  }
+
+  function clearError() { $("alert").classList.remove("show"); }
+
+  function setBusy(busy) {
+    $("run").disabled = busy;
+    $("run").textContent = busy ? "转换中…" : "转换";
+    if (!busy) {
+      $("run").innerHTML = '转换<kbd>Ctrl</kbd><kbd>Enter</kbd>';
+    }
+  }
+
+  function chip(label, value) {
+    var span = document.createElement("span");
+    span.className = "chip";
+    span.innerHTML = label + " <b></b>";
+    span.querySelector("b").textContent = value;
+    return span;
+  }
+
+  function humanBytes(bytes) {
+    if (!bytes) return "0 B";
+    var units = ["B", "KB", "MB", "GB", "TB"], value = bytes, i = 0;
+    while (value >= 1024 && i < units.length - 1) { value /= 1024; i++; }
+    return value.toFixed(i === 0 ? 0 : 2) + " " + units[i];
+  }
+
+  /** links / base64 / v2rayn 目标下结果里到底有多少条链接（base64 先解开再数）。 */
+  function countLinks(result) {
+    var linkTargets = { links: 1, base64: 1, v2rayn: 1 };
+    if (!linkTargets[result.target]) return 0;
+    var text = result.config;
+    if (result.target === "base64") {
+      try {
+        text = atob(text.replace(/-/g, "+").replace(/_/g, "/").trim());
+      } catch (e) {
+        return 0;
+      }
+    }
+    return text.split(/\r?\n/).filter(function (line) { return line.trim(); }).length;
+  }
+
+  function render(result) {
+    last = result;
+    $("output").textContent = result.config;
+
+    var meta = $("meta");
+    meta.textContent = "";
+    meta.appendChild(chip("目标", result.target));
+    meta.appendChild(chip("节点", String(result.nodes)));
+    var linkCount = countLinks(result);
+    if (linkCount > 0) meta.appendChild(chip("链接", linkCount + " 条"));
+    meta.appendChild(chip("文件", result.filename));
+    var info = result.info || {};
+    if (info.total > 0) {
+      meta.appendChild(chip("已用 / 总量",
+        humanBytes((info.upload || 0) + (info.download || 0)) + " / " + humanBytes(info.total)));
+    }
+    if (info.expire > 0) {
+      meta.appendChild(chip("到期", new Date(info.expire * 1000).toLocaleDateString()));
+    }
+
+    var list = $("warnings");
+    list.textContent = "";
+    (result.warnings || []).forEach(function (text) {
+      var li = document.createElement("li");
+      li.textContent = text;
+      list.appendChild(li);
+    });
+
+    $("copy").disabled = false;
+    $("download").disabled = false;
+  }
+
+  function buildApiLink(payload) {
+    var params = ["target=" + encodeURIComponent(payload.target)];
+    if (payload.sources.length) {
+      params.push("url=" + encodeURIComponent(payload.sources.join("|")));
+    }
+    if (payload.content.trim()) {
+      params.push("content=" + encodeURIComponent(payload.content));
+    }
+    if (!payload.options.emoji) params.push("emoji=false");
+    if (!payload.options.udp) params.push("udp=false");
+    if (!payload.options.dedup) params.push("dedup=false");
+    if (!payload.options.rules) params.push("rules=false");
+    if (payload.options.sort) params.push("sort=true");
+    if (payload.options.tfo) params.push("tfo=true");
+    if (!payload.options.ipv6) params.push("ipv6=false");
+    if (payload.options.clash_legacy) params.push("clash_legacy=true");
+    if (payload.options.probe_cert) params.push("probe_cert=true");
+    if (payload.filename) params.push("filename=" + encodeURIComponent(payload.filename));
+    // 显式带上规则集/DNS，链接才能复现界面上的选择（空串 = 只留 MATCH / 不写 nameserver）
+    if (payload.options.rulesets) {
+      params.push("rulesets=" + encodeURIComponent(payload.options.rulesets.join(",")));
+    }
+    if (payload.options.dns) {
+      params.push("dns=" + encodeURIComponent(payload.options.dns.join(",")));
+    }
+    $("apilink").value = location.origin + "/sub?" + params.join("&");
+  }
+
+  // ---- 主流程 ----------------------------------------------------------------
+  function run() {
+    clearError();
+    var payload = splitInput($("input").value);
+    payload.target = currentTarget();
+    payload.options = collectOptions();
+    payload.fetch = collectFetch();
+    // 订阅名是请求体的顶层字段（不走 options）
+    var name = $("opt-name").value.trim();
+    if (name) payload.filename = name;
+
+    if (!payload.sources.length && !payload.content.trim()) {
+      showError("请先填入订阅链接或订阅内容（可以点「填入示例」试试）。");
+      return;
+    }
+
+    setBusy(true);
+    setStatus("正在转换…");
+    buildApiLink(payload);
+
+    fetch("/api/convert", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    }).then(function (response) {
+      return response.json().then(function (json) { return { ok: response.ok, json: json }; });
+    }).then(function (outcome) {
+      if (!outcome.json || outcome.json.ok !== true) {
+        showError((outcome.json && outcome.json.error) || "转换失败（HTTP 状态异常）");
+        setStatus("转换失败");
+        return;
+      }
+      render(outcome.json);
+      setStatus("转换完成 · <b>" + outcome.json.nodes + "</b> 个节点");
+    }).catch(function (error) {
+      showError("请求本地服务失败：" + error.message + "\n请确认 subconv serve 仍在运行。");
+      setStatus("服务不可达");
+    }).then(function () {
+      setBusy(false);
+    });
+  }
+
+  function copyText(text, button) {
+    var done = function () {
+      var original = button.textContent;
+      button.textContent = "已复制";
+      setTimeout(function () { button.textContent = original; }, 1200);
+    };
+    if (navigator.clipboard && window.isSecureContext) {
+      navigator.clipboard.writeText(text).then(done, function () { showError("复制失败，请手动选择文本。"); });
+      return;
+    }
+    var area = document.createElement("textarea");
+    area.value = text;
+    area.style.position = "fixed";
+    area.style.opacity = "0";
+    document.body.appendChild(area);
+    area.select();
+    try { document.execCommand("copy"); done(); } catch (e) { showError("复制失败，请手动选择文本。"); }
+    document.body.removeChild(area);
+  }
+
+  // ---- 事件绑定 --------------------------------------------------------------
+  $("run").addEventListener("click", run);
+  // 勾上/取消「输出 rules」时收起或展开规则集复选
+  $("opt-rules").addEventListener("change", syncRulesetsVisibility);
+  $("example").addEventListener("click", function () { $("input").value = EXAMPLE + "\n"; clearError(); });
+  $("clear").addEventListener("click", function () {
+    $("input").value = "";
+    last = null;
+    $("output").innerHTML = '<span class="placeholder">转换结果会显示在这里。</span>';
+    $("meta").textContent = "";
+    $("warnings").textContent = "";
+    $("copy").disabled = true;
+    $("download").disabled = true;
+    clearError();
+  });
+
+  $("copy").addEventListener("click", function () {
+    if (last) copyText(last.config, this);
+  });
+
+  $("copyapi").addEventListener("click", function () {
+    copyText($("apilink").value, this);
+  });
+
+  $("download").addEventListener("click", function () {
+    if (!last) return;
+    var blob = new Blob([last.config], { type: "text/plain;charset=utf-8" });
+    var url = URL.createObjectURL(blob);
+    var link = document.createElement("a");
+    link.href = url;
+    link.download = last.filename || "config.txt";
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+  });
+
+  document.addEventListener("keydown", function (event) {
+    if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+      event.preventDefault();
+      run();
+    }
+  });
+
+  // 记住上次的输入与选项，省得每次重填
+  try {
+    var saved = JSON.parse(localStorage.getItem("subconv.state") || "null");
+    if (saved) {
+      if (saved.input) $("input").value = saved.input;
+      if (saved.target) {
+        var radio = document.querySelector('input[name="target"][value="' + saved.target + '"]');
+        if (radio) radio.checked = true;
+      }
+      ["emoji", "udp", "dedup", "rules", "sort", "tfo", "ipv6", "legacy"].forEach(function (key) {
+        if (saved.options && typeof saved.options[key] === "boolean") {
+          $("opt-" + key).checked = saved.options[key];
+        }
+      });
+      if (saved.name) $("opt-name").value = saved.name;
+      if (saved.proxy) $("opt-proxy").value = saved.proxy;
+      if (saved.ua) $("opt-ua").value = saved.ua;
+    }
+  } catch (e) { /* localStorage 不可用时忽略 */ }
+
+  window.addEventListener("beforeunload", function () {
+    try {
+      localStorage.setItem("subconv.state", JSON.stringify({
+        input: $("input").value,
+        target: currentTarget(),
+        options: collectOptions(),
+        rulesets: RULESET_IDS === null ? undefined : selectedRuleSets(),
+        dns: DNS_IDS === null ? undefined : selectedDns(),
+        name: $("opt-name").value,
+        proxy: $("opt-proxy").value,
+        ua: $("opt-ua").value
+      }));
+    } catch (e) { /* ignore */ }
+  });
+
+  // 支持用链接预填：/?url=<订阅链接>&target=clash&auto=1
+  // 多个订阅用 | 分隔；auto=1 时打开页面就直接转换。
+  function prefillFromQuery() {
+    var params = new URLSearchParams(location.search);
+    var url = params.get("url");
+    var content = params.get("content");
+    if (!url && !content) return;
+
+    var lines = [];
+    if (url) {
+      url.split("|").forEach(function (item) {
+        if (item.trim()) lines.push(item.trim());
+      });
+    }
+    if (content) lines.push(content);
+    $("input").value = lines.join("\n");
+
+    var target = params.get("target");
+    if (target) {
+      var radio = document.querySelector('input[name="target"][value="' + target + '"]');
+      if (radio) radio.checked = true;
+    }
+    ["emoji", "udp", "dedup", "rules", "sort", "tfo", "ipv6", "legacy"].forEach(function (key) {
+      if (params.has(key)) $("opt-" + key).checked = params.get(key) !== "false";
+    });
+    if (params.get("filename")) $("opt-name").value = params.get("filename");
+    if (params.get("proxy")) $("opt-proxy").value = params.get("proxy");
+    if (params.get("ua")) $("opt-ua").value = params.get("ua");
+
+    syncRulesetsVisibility();
+    if (params.get("auto") === "1") run();
+  }
+
+  // 先把两份目录都拿到再预填/自动转换，避免 rulesets/dns 还没渲染就被 run() 读走
+  loadRulesets().then(loadDns).then(prefillFromQuery);
+
+  // 版本号 + 可用性
+  fetch("/api/version").then(function (r) { return r.json(); }).then(function (info) {
+    $("version").textContent = "v" + info.version;
+    setStatus("本地服务就绪 · 目标 " + info.targets.join(" / ") +
+      (info.curl ? "" : " · <b>未启用 libcurl，订阅链接不可用</b>"));
+  }).catch(function () {
+    setStatus("本地服务不可达");
+  });
+})();
+</script>
+</body>
+</html>

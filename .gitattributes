@@ -1,0 +1,33 @@
+# ===========================================================================
+# 换行与二进制的统一约定
+#
+# 这个仓库在 Windows 上开发、在 Linux 上跑 CI（.github/workflows），所以入库一律 LF。
+# 本项目 Windows 侧的 core.autocrlf=true 只影响检出，不改仓库里的内容；而 .gitattributes
+# 的优先级高于 core.autocrlf，所以这份文件说了算。
+#
+# 没有这份文件会出两个真问题：
+#   1. gradlew 从 Windows 提交时带 CRLF → Linux 上 "bad interpreter: /bin/sh^M"；
+#   2. Windows 的 git 记不住可执行位（core.filemode=false）→ gradlew 入库是 100644，
+#      Linux 上 ./gradlew 直接 Permission denied。
+#      （第 2 条靠本文件治不了，已经用 `git update-index --chmod=+x gradlew` 把索引里的
+#       模式显式设成 100755。）
+# ===========================================================================
+
+# 默认：文本文件入库 LF、检出也 LF —— 两边行为一致，CI 上直接能跑
+* text=auto eol=lf
+
+# Windows 批处理要 CRLF，否则 cmd.exe 读参数偶尔会岔
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# 二进制：一个字节都不许动
+*.jar      binary
+*.webp     binary
+*.png      binary
+*.jpg      binary
+*.jpeg     binary
+*.gif      binary
+*.so       binary
+*.a        binary
+*.jks      binary
+*.keystore binary

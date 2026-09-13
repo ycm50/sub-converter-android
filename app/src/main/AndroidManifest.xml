@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!--
+      这个 App 的「网络」有两种，都用得到 INTERNET：
+        1) 抓订阅：C++ 侧转调 NetBridge → HttpURLConnection
+        2) 与 App 自己起的本机服务通话：WebView 加载 http://127.0.0.1:<随机端口>/
+      本机回环也是网络访问，没有 INTERNET 一样会失败，所以这个权限不是可选的。
+    -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <application
+        android:allowBackup="true"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        android:fullBackupContent="@xml/backup_rules"
+        android:icon="@mipmap/ic_launcher"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:supportsRtl="true"
+        android:theme="@style/Theme.Subconverter"
+        tools:targetApi="33"
+        android:enableOnBackInvokedCallback="true"
+        android:usesCleartextTraffic="true">
+        <!--
+          usesCleartextTraffic：本机服务是明文 HTTP（127.0.0.1），而且订阅源里 http:// 链接
+          也很常见。targetSdk 28+ 默认禁止明文，这里显式放开 —— 流量要么去回环、要么去用户
+          自己填的订阅地址，没有中间人可谈。
+          enableOnBackInvokedCallback：让 API 33+ 走 OnBackInvokedCallback（predictive back），
+          与 MainActivity 里注册的那条路径对齐。
+        -->
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|smallestScreenSize|uiMode|density|fontScale"
+            android:exported="true"
+            android:label="@string/app_name"
+            android:launchMode="singleTop">
+            <!--
+              configChanges 是刻意列全的：转屏 / 深色模式切换时**不重建** Activity，
+              WebView 里的表单内容与 DOM 就都留着，用户不会看到白屏重载。
+              服务本身是进程级单例（ServerHost），即使真的重建了也复用同一个端口。
+            -->
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+    </application>
+
+</manifest>

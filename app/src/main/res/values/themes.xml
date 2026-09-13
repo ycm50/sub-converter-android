@@ -1,0 +1,10 @@
+<resources>
+    <!--
+      唯一界面是 WebView，所以主题只要 framework 那一套就够了：不要 ActionBar。
+      窗口底色跟着系统浅色/深色走 —— WebView 把页面渲染出来之前先露的就是它。
+
+      刻意不继承 AppCompat/Material 的主题：这个 App 一个 AppCompat 组件都没有，
+      Activity 直接继承 android.app.Activity，那两个依赖也已经从 build.gradle.kts 去掉。
+    -->
+    <style name="Theme.Subconverter" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar" />
+</resources>

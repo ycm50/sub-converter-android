@@ -1,0 +1,178 @@
+name: 手动构建 Release APK（含签名）
+
+# 只在 Actions 页面手动点 "Run workflow" 触发。刻意不挂 push / pull_request：
+# 构建是有成本的，这个仓也不想每推一次就烧一遍三 ABI 的 native 编译。
+#
+# 这个 workflow 干两件事：跑 :app:assembleRelease，再用一把**临时生成**的密钥把 APK 签上，
+# 然后把签好的 APK 当 artifact 传上去。密钥在 CI 里现生成（口令 123456，不做任何加密），
+# 既不进仓库也不用 Secrets —— 代价是每次构建的签名都不一样，详见 README。
+# **不做任何发布** —— 不创建 GitHub Release、不打 tag、不推任何东西；
+# 权限里也刻意只给 contents: read（要发布至少得有 write，这里没有）。
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# 同一分支连点两次就取消前一次，省得排队
+concurrency:
+  group: manual-build-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 必须和 app/build.gradle.kts 里的 ndkVersion 一致，否则 AGP 在 $SDK/ndk/<版本>
+  # 下找不到，configure 期直接报 "NDK not configured"。下面有一步专门核对这两处。
+  NDK_VERSION: "28.2.13676358"
+  # AGP 9 在不写 externalNativeBuild.cmake.version 时要求的就是 3.22.1。
+  CMAKE_VERSION: "3.22.1"
+  # compileSdk = release(36) { minorApiLevel = 1 } → 平台包名带小版本号，别写成 android-36。
+  PLATFORM: "android-36.1"
+  BUILD_TOOLS: "36.1.0"
+
+jobs:
+  release:
+    name: assembleRelease + 签名
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 取代码
+        uses: actions/checkout@v4
+
+      # 必须是 21：gradle/gradle-daemon-jvm.properties 里写着 toolchainVersion=21。
+      # setup-java 设好 JAVA_HOME 之后，Gradle 判定「当前 JVM 就满足要求」，
+      # 不会再去 foojay 下载 toolchain（本机就是这个行为，~/.gradle/jdks 一直是空的）。
+      - name: 装 JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      # runner 镜像自带 Android SDK，但路径与 cmdline-tools 的位置不值得硬编码：
+      # 这里现找一遍，找不到就把目录列出来再退出 —— 镜像布局变了能一眼看出来，
+      # 而不是在下游报一个莫名其妙的 "NDK not configured"。
+      - name: 定位 Android SDK 与 sdkmanager
+        run: |
+          SDK="${ANDROID_SDK_ROOT:-${ANDROID_HOME:-/usr/local/lib/android/sdk}}"
+          if [ ! -x "$SDK/cmdline-tools/latest/bin/sdkmanager" ]; then
+            echo "::error::在 $SDK 下找不到 cmdline-tools/latest/bin/sdkmanager，runner 镜像布局变了"
+            ls -la "$SDK" || true
+            exit 1
+          fi
+          # 两个变量指到同一处：AGP 看到多个来源指向不同路径会直接报错，同值才没事。
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "$SDK/cmdline-tools/latest/bin" >> "$GITHUB_PATH"
+
+      # 这两处写在不同文件里，改一处忘另一处会得到一个很难联想的报错，所以放在最前面拦。
+      - name: 核对 ndkVersion 与 NDK_VERSION 是否一致
+        run: |
+          if ! grep -q "ndkVersion = \"$NDK_VERSION\"" app/build.gradle.kts; then
+            echo "::error::app/build.gradle.kts 的 ndkVersion 与 workflow 的 NDK_VERSION 不一致"
+            grep -n "ndkVersion" app/build.gradle.kts || true
+            exit 1
+          fi
+
+      # 这几样 runner 镜像里不一定有，而且全是 configure 期就硬要的东西：
+      #   ndk;<ndkVersion>        没有 → "NDK not configured. Download it with SDK manager."
+      #   cmake;<3.22.1>          没有 → "CMake ... was not found in SDK, PATH, or by cmake.dir"
+      #   platforms;android-36.1  没有 → compileSdk 找不到平台
+      #   build-tools;<36.1.0>    aapt2 / d8，以及最后签名要用的 zipalign 与 apksigner
+      # 包名不是拼出来的，是照本机 SDK 里各 package.xml 的 localPackage path 抄的。
+      - name: 接受许可并安装 NDK / CMake / platform / build-tools
+        run: |
+          # 非交互接受许可（CI 上没有 TTY，不先接受就可能卡在提示上）
+          yes | sdkmanager --licenses > /dev/null || true
+          sdkmanager --install \
+            "ndk;$NDK_VERSION" \
+            "cmake;$CMAKE_VERSION" \
+            "platforms;$PLATFORM" \
+            "build-tools;$BUILD_TOOLS" \
+            "platform-tools"
+
+      # 只负责缓存（Gradle 分发包、依赖、build cache）。删掉这行构建照样成功，只是慢。
+      - name: Gradle 缓存
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: assembleRelease
+        run: ./gradlew :app:assembleRelease --stacktrace
+
+      # 仓库里不存任何签名密钥，也不用 Secrets：每次都现生成一把口令 123456 的，
+      # 唯一目的是让产物「能被 Android 安装」（未签名的 APK 装不上）。
+      # 不做任何加密，这把密钥也没有保密价值 —— 它每次构建都不一样，用完即弃。
+      # 顺序按官方要求：先 zipalign，再 apksigner（apksigner 必须在最后一步）。
+      - name: 生成临时密钥并签名
+        run: |
+          BT="$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS"
+          UNSIGNED="app/build/outputs/apk/release/app-release-unsigned.apk"
+          SIGNED="app/build/outputs/apk/release/app-release.apk"
+          KS="$RUNNER_TEMP/release.p12"
+
+          if [ ! -f "$UNSIGNED" ]; then
+            echo "::error::没有找到 $UNSIGNED"
+            ls -R app/build/outputs || true
+            exit 1
+          fi
+
+          # PKCS12 要求 storepass 和 keypass 一致，这里两个都是 123456。
+          # 用 $JAVA_HOME/bin/keytool 而不是裸 keytool：确保是刚才那套 JDK 21 自带的。
+          "$JAVA_HOME/bin/keytool" -genkeypair \
+            -keystore "$KS" -storetype PKCS12 \
+            -alias subconverter \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -storepass 123456 -keypass 123456 \
+            -dname "CN=subconverter, OU=Android, O=ycm50, C=CN"
+
+          "$BT/zipalign" -f -p 4 "$UNSIGNED" "$RUNNER_TEMP/aligned.apk"
+          "$BT/apksigner" sign \
+            --ks "$KS" --ks-type PKCS12 --ks-key-alias subconverter \
+            --ks-pass pass:123456 --key-pass pass:123456 \
+            --out "$SIGNED" "$RUNNER_TEMP/aligned.apk"
+
+          echo "=== apksigner verify ==="
+          "$BT/apksigner" verify --verbose "$SIGNED"
+
+      - name: 把产物信息写进 job summary
+        run: |
+          BT="$ANDROID_SDK_ROOT/build-tools/$BUILD_TOOLS"
+          APK="app/build/outputs/apk/release/app-release.apk"
+          if [ ! -f "$APK" ]; then
+            echo "::error::没有签好名的 APK"
+            ls -R app/build/outputs || true
+            exit 1
+          fi
+          {
+            echo "### 构建产物（已签名，可直接安装）"
+            echo
+            echo "| 项 | 值 |"
+            echo "|---|---|"
+            echo "| 文件 | \`$(basename "$APK")\` |"
+            echo "| 大小 | $(du -h "$APK" | cut -f1) |"
+            echo "| SHA-256 | \`$(sha256sum "$APK" | cut -d' ' -f1)\` |"
+            echo
+            echo "签名证书："
+            echo
+            echo '```'
+            "$BT/apksigner" verify --print-certs "$APK"
+            echo '```'
+            echo "包含的原生库（三个 ABI 的 libsubconv.so 都应该在）："
+            echo
+            echo '```'
+            unzip -l "$APK" | awk '/lib\/.*\.so$/ {print $4}'
+            echo '```'
+            echo
+            echo "> ⚠️ 密钥是**本次构建临时生成**的（口令 123456，不做任何加密），所以每次构建"
+            echo "> 的签名都不同：\`adb install -r\` 覆盖安装会因签名不一致失败，必须先卸载旧版"
+            echo "> 再装（App 数据会清掉）。想要签名稳定，就得换成固定密钥。"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: 上传 artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          # 明确只传签好名的那一个：同目录下还有 app-release-unsigned.apk，
+          # 用通配符 */*.apk 有可能把它也捞进来。
+          path: app/build/outputs/apk/release/app-release.apk
+          # 没产出就红，别给一个「绿了但没有 APK」的假成功
+          if-no-files-found: error
+          retention-days: 14

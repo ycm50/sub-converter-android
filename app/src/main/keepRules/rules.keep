@@ -1,0 +1,32 @@
+# Add project specific R8 rules here.
+# AGP will combine all keep rule files in src/main/keepRules to pass to R8
+#
+# For more details, see
+#   https://d.android.com/r/tools/r8/keep-rules
+
+# ---------------------------------------------------------------------------
+# JNI 入口
+#
+# native 方法是 C++ 按**名字**去找的（Java_com_subconverter_NativeServer_nativeStart ...），
+# R8 一旦改名或删掉，运行时只剩 UnsatisfiedLinkError，而且报错发生在 System.loadLibrary
+# 之后很久，很难联想到混淆。
+# ---------------------------------------------------------------------------
+-keepclasseswithmembernames class * { native <methods>; }
+-keep class com.subconverter.NativeServer { *; }
+
+# ---------------------------------------------------------------------------
+# 被 native 代码调用的 Java 类
+#
+# NetBridge 的方法**只**从 C++ 侧调用（src/fetch/android_http.cpp），R8 在 Java 世界
+# 看不到任何调用点，会认定整类是死代码直接删掉。
+# ---------------------------------------------------------------------------
+-keep class com.subconverter.NetBridge { *; }
+
+# ---------------------------------------------------------------------------
+# WebView 的 JS 接口
+#
+# addJavascriptInterface 暴露出去的方法是页面里的 JS 按名字调的，同样要保住。
+# ---------------------------------------------------------------------------
+-keepclassmembers class com.subconverter.DownloadBridge {
+    @android.webkit.JavascriptInterface <methods>;
+}
