@@ -13,6 +13,35 @@ HTTP 服务 + 内嵌 Web UI；本 App 要做的正是这件事：启动即等价
 | 上游版本 | 0.1.0 |
 | 移植日期 | 2026-09-14 |
 
+## 怎么跟上游同步
+
+本目录里的上游代码是 **vendor 进来的源码**，不是「链接上游的产物」；对它的改动全部固化成
+补丁，所以「跟进上游」跑 Gradle 任务就行，不用手工 diff。**同步默认挂在构建上**，
+所以日常是一条命令：
+
+```bash
+./gradlew :app:assembleRelease     # pull → 套补丁 → 编内核 → .so 进 APK 的 lib/<abi>/
+```
+
+单独同步 / 前移锚点 / 只看差多少：
+
+```bash
+./gradlew syncUpstream                                                   # 同步到锚点
+./gradlew syncUpstream -Psubconv.dryRun=true                              # 离锚点差多少（不写文件）
+./gradlew syncUpstream -Psubconv.fetch=true -Psubconv.ref=<新commit> -Psubconv.updatePin=true
+./gradlew verifyKernel                                                    # 核对 APK 里三个 ABI 的 .so
+```
+
+* 锚点（默认同步到哪个 commit）在 [`tools/upstream-ref.txt`](../../../../tools/upstream-ref.txt)
+* 改动清单在 [`patches/`](../../../../patches/)，每个补丁对应下面的一节
+* 任务实现、边界清单、属性表在
+  [`gradle/subconv-upstream.gradle.kts`](../../../../gradle/subconv-upstream.gradle.kts) /
+  [`README.md`](../../../../README.md) 的「跟进上游」
+* 不打开 Studio 单独编三份 `.so` 自检：`tools/build-native.ps1`（Windows，
+  用法与自检项见 [`tools/README.md`](../../../../tools/README.md)）
+
+本文件下面的「目录对应关系」「对上游代码的改动」就是补丁在做什么 —— 改补丁时两份要一起改。
+
 ## 目录对应关系
 
 | 本目录 | 上游 | 说明 |

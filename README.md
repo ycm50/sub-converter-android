@@ -59,10 +59,22 @@ ServerHost ──► NativeServer.nativeStart("127.0.0.1", 0)      ← port = 0�
 ./gradlew :app:connectedAndroidTest   # 跑设备上的冒烟测试（见下）
 ```
 
+**`assembleDebug` / `assembleRelease` 之前会先跑一次上游同步**：从上游克隆里取
+`tools/upstream-ref.txt` 那个锚点 commit 的源码，覆盖进 `app/src/main/cpp`，再套上
+`patches/` 里的 Android 适配补丁，然后才编内核 —— 也就是「pull → 套补丁 → 编内核 →
+`.so` 落到 APK 的 `lib/<abi>/`」这整条链都在一条命令里。不想让它碰上游（离线，或者
+只想编当前工作区）：
+
+```bash
+./gradlew :app:assembleDebug -Psubconv.syncOnBuild=false
+```
+
+细节见「[跟进上游](#跟进上游)」。
+
 ### 本机环境（已经配好了，以及为什么）
 
 下面是让构建在这台机器上真的跑起来所需的全部信息 —— **依据是一次成功构建留下的现场**：
-`app/build/outputs/apk/debug/app-debug.apk`（14.4 MB，`lib/{arm64-v8a,armeabi-v7a,x86_64}/
+`app/build/outputs/apk/debug/app-debug.apk`（9.3 MiB，`lib/{arm64-v8a,armeabi-v7a,x86_64}/
 libsubconv.so` 三个 ABI 都在），以及 `.cxx/Debug/*/CMakeCache.txt` 里记下的实际用的
 NDK / CMake 路径。
 
@@ -180,6 +192,30 @@ appcompat / material 都不需要）都已在 `~/.gradle/caches` 里，NDK 与 C
 "Run workflow" 触发**（Actions →「手动构建 Release APK（含签名）」→ Run workflow，可以选分支），
 跑 `:app:assembleRelease` → 现生成密钥签名 → 把**签好的** APK 作为 artifact 传上去。
 
+* **构建时强制先拉上游最新代码**（`syncUpstream` 默认挂在构建上）：上游 C++ 仓库**硬编码在
+  workflow 的 `UPSTREAM_CPP_REPO`**（`https://github.com/ycm50/sub-converter.git`，约 1.9 MB，
+  每次构建现 clone），然后 `-Psubconv.fetch=true` + `-Psubconv.ref=origin/HEAD` ——
+  **不填 `upstream_ref` 时编的就是上游默认分支的最新提交**，不是仓库里那个锚点。
+  任何一步失败（网络、补丁套不上、CMakeLists 列表对不上）都直接红，
+  **不会**退化成"不拉上游照样编"。想钉到一个已知能编的 commit，Run workflow 时把
+  `upstream_ref` 填上（commit / tag / 分支都行）。
+  ⚠️ 注意**这只影响这一次构建的产物，不会改仓库里的锚点**：真跟进得在本地
+  `./gradlew syncUpstream -Psubconv.ref=<新> -Psubconv.updatePin=true` 再提交。
+* **所以 CI 同时是"上游漂移的探针"**：上游一动到我们的 `patches/` 或 `CMakeLists.txt` 源文件
+  列表跟不上的地方，CI 就会红（这是有意的 —— 它比"本地一直编旧代码、直到某天跟进才发现"
+  早很多）。当前上游 `67fba3a` 新增了 `src/core/vless_encryption.cpp`，本仓库还没跟进，
+  所以在补齐之前，**默认（= 上游最新）那一次 CI 就是会红的**：要么把 CMakeLists 那一行补上
+  并前移锚点，要么 `upstream_ref` 填锚点 `7ef9a56…`。
+* **`-Psubconv.strict=true` 只开在 CI**：CMakeLists 的源文件列表和上游对不上时直接失败。
+  默认关（平时只是警告）—— 但 CI 每次拿的都是上游最新，等链接期报 undefined reference
+  再排查，比在这里红一条贵得多。
+* **每次构建会把实际用的上游 commit 写进 job summary**（`build/upstream-sync/last-sync.txt`），
+  所以一个 artifact 能追溯到它是从哪个上游提交编出来的。
+* 紧接着 assembleRelease 跑 `./gradlew verifyKernel`：三个 ABI 的 `libsubconv.so` 都在、
+  且没有 `libc++_shared.so`，native 侧静默编空那种事故在这里就红了。
+* **`actions/checkout` 特意关掉了 `persist-credentials`**：默认 `true` 时它会把 GITHUB_TOKEN
+  写进本仓库的 git config，而同步是在这个目录里 `git clone` **上游仓库** —— 一个只对本仓库
+  有效的 token 被带过去，GitHub 会回 404（看着像"公开仓库 clone 不到"）。
 * **刻意不发布**：workflow 的权限只有 `contents: read`，不创建 GitHub Release、不打 tag、
   不推任何东西 —— 想发布至少得先给它 `write` 权限，而这里没有。
 * **CI 上要现装的东西**：NDK `28.2.13676358`、CMake `3.22.1`、`platforms;android-36.1`
@@ -251,6 +287,68 @@ app/src/main/
 └── keepRules/rules.keep              JNI / JS 接口的 R8 keep 规则
 ```
 
+仓库里还有这几处，管的是「C++ 侧怎么跟着上游走」：
+
+```
+gradle/subconv-upstream.gradle.kts   syncUpstream / verifyKernel 两个任务 + 边界清单
+patches/                             对上游代码的全部改动（4 个补丁）
+tools/
+├── upstream-ref.txt                 移植基线锚点（一个 commit hash）
+└── build-native.ps1                 用 NDK 编三份 libsubconv.so 并自检（Windows，不依赖 Gradle）
+```
+
+## 跟进上游
+
+`app/src/main/cpp/` 里的上游代码是 **vendor 进来的源码**，对它的改动全部固化在
+`patches/` 里的 4 个补丁中 —— 所以上游更新时不需要手工 diff。**同步默认挂在构建上**，
+日常只有一条命令：
+
+```bash
+# pull → 套补丁 → 编内核 → 三份 .so 落到 APK 的 lib/<abi>/
+./gradlew :app:assembleRelease
+```
+
+想单独同步、前移锚点、或者只看差多少，用 `syncUpstream` / `verifyKernel`：
+
+```bash
+./gradlew syncUpstream                                    # 同步到 tools/upstream-ref.txt 的锚点
+./gradlew syncUpstream -Psubconv.dryRun=true               # 只看差多少，一个字都不写
+./gradlew syncUpstream -Psubconv.fetch=true                # 先 git fetch（本地克隆）再同步
+./gradlew syncUpstream -Psubconv.ref=<新commit> -Psubconv.updatePin=true   # 跟进并前移锚点
+
+./gradlew verifyKernel                                     # 核对 APK 里三个 ABI 的 .so 都在
+```
+
+> ⚠️ **PowerShell 里 `-P...` 必须加引号**：PS 会把 `-Psubconv.dryRun=true` 拆成两个参数，
+> Gradle 于是报 `Task '.dryRun=true' not found in root project`（看着像任务没了，其实是参数被拆）。
+> 写成 `'-Psubconv.dryRun=true'` 就行 —— Linux / macOS / CI 的 bash 不用加。
+
+| 属性（`-Psubconv.*`） | 默认 | 说明 |
+|---|---|---|
+| `syncOnBuild` | `true` | 构建前自动同步；`=false` 关掉（离线，或只想编当前工作区） |
+| `ref` | 锚点 | 同步到哪个 commit / tag / 分支。**CI 上默认 `origin/HEAD`（上游最新）**；本地想跟最新就用它克隆自己的 `origin/HEAD` |
+| `upstream` | `..\sub-converter`，没有就 clone | 上游克隆的路径或 URL；给 URL 时 clone 到 `build/upstream-cache`。**CI 上硬编码在 workflow 里** |
+| `dryRun` | `false` | 只报告会做什么，不写文件、不套补丁 |
+| `fetch` | `false` | 同步前先 `git fetch --all --tags --prune`（需要网络）。**URL 模式 / CI 上都开着**：`build/upstream-cache` 会一直停在第一次 clone 的样子，不 fetch 就看不到上游的新 commit |
+| `strict` | `false` | CMakeLists 源文件列表和上游对不上时**直接失败**（CI 上开着；本地默认只警告） |
+| `reject` | `false` | 补丁套不上时用 `--reject` 落 `.rej`，而不是整体失败 |
+| `updatePin` | `false` | 成功后把 `tools/upstream-ref.txt` 改成实际用的 commit |
+| `cppDir` | `app/src/main/cpp` | 被同步的目录 |
+| `abis` | `arm64-v8a,armeabi-v7a,x86_64` | `verifyKernel` 期望的 ABI（实际以 `abiFilters` 为准） |
+| `git` | `git` | git 可执行文件 |
+
+同步会自检两件容易出事的地方：**vendor 目录和上游的差异是不是恰好等于补丁集**，
+以及**上游新增的 `.cpp` 有没有进 `CMakeLists.txt` 的源文件列表**（那份列表是显式写的，
+不会自动长出新文件 —— 漏加要到链接期才炸；这一条只报警告，故意不自动改）。
+
+工作区已经是「上游 + 补丁」时同步会**一个字节都不写**（跳过覆盖与套补丁）——
+否则每次构建都要重写 `include/subconv/server.hpp`，而它是被到处 include 的头，
+ninja 一看到它就会把几十个 TU 全量重编一遍。
+
+改动清单与原因在 [`app/src/main/cpp/UPSTREAM.md`](app/src/main/cpp/UPSTREAM.md)，
+补丁怎么改在 [`patches/README.md`](patches/README.md)，
+任务的实现（边界清单只有这一份）在 [`gradle/subconv-upstream.gradle.kts`](gradle/subconv-upstream.gradle.kts)。
+
 ## 与桌面版的功能差异
 
 | 能力 | Android | 说明 |
@@ -317,10 +415,12 @@ app/src/main/
 | `*.jks`、`*.keystore`、`keystore.properties` | ❌ | 签名私钥 |
 | `gradle/wrapper/gradle-wrapper.jar` | ✅ | **别忽略**：没有它 `gradlew` 就跑不起来 |
 | `gradle/libs.versions.toml`、`gradle.properties`、`gradle/gradle-daemon-jvm.properties` | ✅ | 依赖版本与构建开关，与机器无关 |
+| `gradle/subconv-upstream.gradle.kts` | ✅ | 同步上游 + 套补丁 + `verifyKernel` 的任务；边界清单只有这一份 |
 | `app/src/main/cpp/third_party/` | ✅ | 依赖是 vendor 进来的，为的就是没外网也能构建 |
 | `app/src/main/cpp/data/web/index.html` | ✅ | 上游 Web UI，配置期被 `file(READ)` 内嵌进 `.so` |
+| `patches/`、`tools/` | ✅ | 对上游代码的改动 + 补丁集 + 独立编 `.so` 的脚本 —— 没了它们，「跟上游」就退回手工 diff |
 
-按上面的规则，需要进库的源码一共 **约 190 个文件 / 1.7 MB**（其中 C++ 侧 1.6 MB），
+按上面的规则，需要进库的源码一共 **约 200 个文件 / 1.8 MB**（其中 C++ 侧 1.6 MB），
 没有一个是构建产物。
 
 ## 第三方组件与许可
@@ -340,10 +440,16 @@ app/src/main/
   缺任何一个都会在 **configure 期**就失败（分别报 `NDK not configured` 和
   `CMake ... was not found in SDK, PATH, or by cmake.dir property`），跟代码无关。
   本机是靠 C 盘那份 SDK 里指向 A 盘的两个目录 junction 满足的（见上面「本机环境」）。
-* 这个仓库自己**从来没有运行过编译器 / CMake / Gradle**（那是刻意的：移植只交代码）。
-  不过 `app/build/` 里留着一次真实构建的现场：debug APK（14.4 MB）、三个 ABI 的
-  `libsubconv.so`、`.cxx/` 下的 CMake 与 ninja 日志，说明 C++ 侧确实编得过。
-  ⚠️ 「去掉所有 UI」这一次的改动（`MainActivity` 重写 + 依赖裁剪）**还没有重新构建过**。
+* **构建在本机实测跑通过**：`./gradlew :app:assembleDebug` 出
+  `app/build/outputs/apk/debug/app-debug.apk`（9.3 MiB，三个 ABI 的 `libsubconv.so` 都在），
+  `./gradlew verifyKernel` 对着这个 APK 全过；同步挂在构建上这条链也实测过
+  （`./gradlew :app:assembleDebug` 会先跑 `syncUpstream`，工作区已经干净时它一个字节都不动，
+  后面 ninja 该 UP-TO-DATE 还是 UP-TO-DATE）。CI（GitHub Actions）那条路**还没有在 CI 上真正跑过**。
+* C++ 侧还可以不打开 Studio 独立验证：`tools\build-native.ps1` 用同一份 NDK/CMake
+  编出三份 `libsubconv.so`，本机实测三个 ABI 全过（`e_machine` 正确、`DT_NEEDED` 里
+  只有 `liblog/libm/libdl/libc`、6 个 JNI 符号齐全，明细见 `tools/README.md`）。
+  它和 `./gradlew verifyKernel` 查的是两头：前者查**编出来的 `.so`**（ELF 架构 / `DT_NEEDED` /
+  JNI 符号），后者查**进包的那份**（APK 里三个 ABI 齐不齐、有没有漏出 `libc++_shared.so`）。
 * workflow 里那三步签名命令（`keytool -genkeypair` / `zipalign -f -p 4` / `apksigner sign`）
   用同一版 `build-tools;36.1.0` 在本机对着 debug APK 的**副本**预演过：签完
   `apksigner verify` 报 v2 + v3 通过（minSdk 24，v1 JAR 签名按 apksigner 的默认值关掉）。

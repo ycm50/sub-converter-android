@@ -3,13 +3,24 @@ name: 手动构建 Release APK（含签名）
 # 只在 Actions 页面手动点 "Run workflow" 触发。刻意不挂 push / pull_request：
 # 构建是有成本的，这个仓也不想每推一次就烧一遍三 ABI 的 native 编译。
 #
-# 这个 workflow 干两件事：跑 :app:assembleRelease，再用一把**临时生成**的密钥把 APK 签上，
-# 然后把签好的 APK 当 artifact 传上去。密钥在 CI 里现生成（口令 123456，不做任何加密），
+# 这个 workflow 干四件事：把上游最新的 C++ 源码拉下来并套上 patches/（见下面第 12 行起）
+# → :app:assembleRelease → verifyKernel 核对进包的三个 .so → 用一把**临时生成**的密钥把 APK
+# 签上，然后把签好的 APK 当 artifact 传上去。密钥在 CI 里现生成（口令 123456，不做任何加密），
 # 既不进仓库也不用 Secrets —— 代价是每次构建的签名都不一样，详见 README。
 # **不做任何发布** —— 不创建 GitHub Release、不打 tag、不推任何东西；
 # 权限里也刻意只给 contents: read（要发布至少得有 write，这里没有）。
+#
+# assembleRelease 之前**强制**先拉上游最新的 C++ 源码（syncUpstream 默认挂在构建上）：
+# 硬编码的 UPSTREAM_CPP_REPO → git fetch → origin/HEAD（上游默认分支最新）→ 套 patches/
+# → 再编三 ABI 的 libsubconv.so。任何一步失败就直接红，**不会**退化成「不拉上游照样编」。
+# 想钉到某个已知能编的 commit，触发时填 upstream_ref。
 on:
   workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: "钉到上游哪个 commit / tag / 分支（留空 = 上游最新 origin/HEAD）"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -28,6 +39,11 @@ env:
   # compileSdk = release(36) { minorApiLevel = 1 } → 平台包名带小版本号，别写成 android-36。
   PLATFORM: "android-36.1"
   BUILD_TOOLS: "36.1.0"
+  # 上游 C++ 仓库**硬编码在这里** —— 不依赖「同级目录有个克隆」那种只在本机成立的约定。
+  # 换上游只改这一行（Gradle 侧同名默认值只是本机没给 -P 时的回退）。
+  UPSTREAM_CPP_REPO: "https://github.com/ycm50/sub-converter.git"
+  # 没填 upstream_ref 时同步到哪：origin/HEAD = 上游默认分支的最新提交。
+  UPSTREAM_DEFAULT_REF: "origin/HEAD"
 
 jobs:
   release:
@@ -38,6 +54,14 @@ jobs:
     steps:
       - name: 取代码
         uses: actions/checkout@v4
+        with:
+          # 必须关掉。默认 true 时 checkout 会把 GITHUB_TOKEN 写进本仓库的 git config
+          # （http.<server>/.extraheader），而下一步的 syncUpstream 是在这个目录里
+          # `git clone https://github.com/ycm50/sub-converter.git` —— 于是这个只对本仓库
+          # 有 contents:read 的 token 会被带去 clone **上游仓库**，GitHub 对「带了个不匹配的
+          # Authorization 头」的请求回的是 404，表现是「公开仓库 clone 不到」。
+          # 匿名 clone 公开仓库不需要任何凭据，这里也从不 push，所以关掉最干净。
+          persist-credentials: false
 
       # 必须是 21：gradle/gradle-daemon-jvm.properties 里写着 toolchainVersion=21。
       # setup-java 设好 JAVA_HOME 之后，Gradle 判定「当前 JVM 就满足要求」，
@@ -94,8 +118,33 @@ jobs:
       - name: Gradle 缓存
         uses: gradle/actions/setup-gradle@v4
 
-      - name: assembleRelease
-        run: ./gradlew :app:assembleRelease --stacktrace
+      # 拉上游最新代码 → 套补丁 → 编三 ABI → 出 app-release-unsigned.apk。
+      # 五个开关都是必须的，少一个就变成「本地约定」或者「可能编了旧代码」：
+      #   syncOnBuild=true   构建前先同步（这也是默认值，写出来是为了让 CI 明确）
+      #   upstream=<硬编码>   不给就会退回「找同级克隆」那条本机约定
+      #   fetch=true         先 git fetch --all --tags --prune；不然 build/upstream-cache
+      #                      会停在旧样子，origin/HEAD 就不是最新了
+      #   ref=origin/HEAD    上游默认分支最新（填 upstream_ref 则钉到指定 commit）
+      #   strict=true        CMakeLists 源文件列表和上游对不上时直接失败，不留到链接期
+      - name: 拉上游最新代码 + assembleRelease
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref }}
+        run: |
+          REF="${UPSTREAM_REF:-$UPSTREAM_DEFAULT_REF}"
+          echo "上游仓库: $UPSTREAM_CPP_REPO"
+          echo "上游 ref: $REF"
+          ./gradlew :app:assembleRelease --stacktrace \
+            -Psubconv.syncOnBuild=true \
+            -Psubconv.upstream="$UPSTREAM_CPP_REPO" \
+            -Psubconv.fetch=true \
+            -Psubconv.ref="$REF" \
+            -Psubconv.strict=true
+
+      # 三个 ABI 的 libsubconv.so 有没有真的进包、有没有漏出 libc++_shared.so。
+      # job summary 里那份 unzip 列表只是肉眼看的，这一条会真的把构建打红。
+      # 放在签名之前：此时产物还是 app-release-unsigned.apk，照样能读。
+      - name: 核对 APK 里的原生库
+        run: ./gradlew verifyKernel
 
       # 仓库里不存任何签名密钥，也不用 Secrets：每次都现生成一把口令 123456 的，
       # 唯一目的是让产物「能被 Android 安装」（未签名的 APK 装不上）。
@@ -149,6 +198,12 @@ jobs:
             echo "| 文件 | \`$(basename "$APK")\` |"
             echo "| 大小 | $(du -h "$APK" | cut -f1) |"
             echo "| SHA-256 | \`$(sha256sum "$APK" | cut -d' ' -f1)\` |"
+            echo
+            echo "构建用的上游源码（每次构建都拉最新，这段是这次实际用的 commit）："
+            echo
+            echo '```'
+            cat build/upstream-sync/last-sync.txt 2>/dev/null || echo "（没有 build/upstream-sync/last-sync.txt）"
+            echo '```'
             echo
             echo "签名证书："
             echo

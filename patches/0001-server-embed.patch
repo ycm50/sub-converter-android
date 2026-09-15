@@ -1,0 +1,204 @@
+diff --git a/include/subconv/server.hpp b/include/subconv/server.hpp
+index 2cc6bf0..2dcf2fe 100644
+--- a/include/subconv/server.hpp
++++ b/include/subconv/server.hpp
+@@ -7,6 +7,7 @@
+ #pragma once
+ 
+ #include <cstddef>
++#include <functional>
+ #include <string>
+ #include <string_view>
+ #include <vector>
+@@ -70,8 +71,25 @@ struct ServerOptions {
+ /// 从 URL 路径推断目标：`/clash`、`/xray`、`/sing-box` 等；`/sub` 或无法识别时返回空串。
+ [[nodiscard]] std::string target_from_path(std::string_view path);
+ 
++/// 监听成功后的回调：告知 Web UI 的实际 URL 与实际绑定端口。
++///
++/// 为什么需要它：`ServerOptions::port == 0` 时端口由系统分配，这个回调是唯一能把它
++/// 带出来的途径（`run()` 本来也 `getsockname()` 到了端口，但只用来打印一行日志）。
++/// 嵌入式宿主（Android WebView）不该去解析日志拿端口，所以这里显式给它一个出口。
++using ReadyHandler = std::function<void(const std::string& url, int port)>;
++
+ /// 阻塞运行 HTTP 服务（Ctrl+C 结束）。
+ /// 启动后会往 stdout 打印一行 `Web UI: http://<host>:<port>/`，便于脚本探测实际端口。
+-[[nodiscard]] Result<void> run(const ServerOptions& opts);
++///
++/// on_ready 非空时，在监听成功、进入 accept 循环**之前**被调用一次，参数是实际端口
++/// （`opts.port` 为 0 时即系统分配的那个）；调用发生在 run() 所在线程。
++[[nodiscard]] Result<void> run(const ServerOptions& opts, const ReadyHandler& on_ready = {});
++
++/// 请求停止正在运行的 run()，让它正常返回（而不是报错）。线程安全。
++///
++/// 为什么需要它：run() 原本是「Ctrl+C 结束」的命令行形态，进程退出就等于停止；
++/// 而 Android 上同一个进程里服务要随宿主（Activity）反复开关，必须能主动停。
++/// 当前没有服务在跑时是空操作。
++void request_stop() noexcept;
+ 
+ }  // namespace subconv::server
+diff --git a/src/server/http.cpp b/src/server/http.cpp
+index 60cf9f3..65d1fb0 100644
+--- a/src/server/http.cpp
++++ b/src/server/http.cpp
+@@ -12,10 +12,12 @@
+ //   GET  /sub?target=&url=...  subconverter 兼容子集，直接返回配置文本
+ //   GET  /clash /xray /sing-box?...  同上（路径即目标）
+ #include <algorithm>
++#include <atomic>
+ #include <cstdio>
+ #include <cstdlib>
+ #include <cstring>
+ #include <map>
++#include <mutex>
+ #include <string>
+ #include <string_view>
+ #include <utility>
+@@ -32,6 +34,7 @@
+ #include <cerrno>
+ #include <netdb.h>
+ #include <netinet/in.h>
++#include <poll.h>
+ #include <sys/socket.h>
+ #include <sys/time.h>
+ #include <unistd.h>
+@@ -87,6 +90,13 @@ struct SocketGuard {
+     fd = handle;
+   }
+   [[nodiscard]] bool valid() const noexcept { return fd != kInvalidSocket; }
++
++  /// 交出所有权（本守卫不再负责关闭）。给「把 fd 移交给别人管」的场景用。
++  [[nodiscard]] socket_t release() noexcept {
++    const socket_t handle = fd;
++    fd = kInvalidSocket;
++    return handle;
++  }
+ };
+ 
+ #ifdef _WIN32
+@@ -102,6 +112,58 @@ struct WinsockGuard {
+ };
+ #endif
+ 
++// ---------------------------------------------------------------------------
++// 停止支持（给嵌入式宿主用：Android 上服务要随 Activity 开关，见 server.hpp）
++//
++// accept() 阻塞在系统调用里时，光靠「检查一个标志」是退不出来的，得先把循环叫醒。
++// 这里用两条互补的路子，任何一条成立都能让 run() 及时返回：
++//   1. request_stop() 对监听套接字 shutdown()：Linux/Android 上这会让 accept() 立刻返回；
++//   2. 循环里不是裸阻塞 accept()，而是先 poll() 带 500ms 超时 —— 就算第 1 条在某平台上
++//      叫不醒（Windows 的 shutdown 对监听套接字无效），最多一个超时周期也会回到标志检查。
++//
++// 监听 fd 的「登记 → shutdown → 注销 → close」必须整体串行化，否则会出现这样的竞态：
++// request_stop() 读到 fd，此时 run() 正好返回并把 fd close 掉，操作系统把它分配给了
++// 新的连接 —— 接着那句 shutdown() 就打在了别人身上。所以这里不用 atomic，改用一把锁，
++// 并且让 fd 的所有权落在 ListenerRegistration 手上、在锁内关闭。
++// ---------------------------------------------------------------------------
++std::mutex g_listener_mutex;
++socket_t g_listener_fd = kInvalidSocket;  ///< 由 g_listener_mutex 保护
++std::atomic<bool> g_stop_requested{false};
++
++/// 接管监听 fd：登记给 request_stop() 用，并在析构时（锁内）关闭它。
++struct ListenerRegistration {
++  socket_t fd = kInvalidSocket;
++
++  explicit ListenerRegistration(SocketGuard& guard) : fd(guard.release()) {
++    std::lock_guard<std::mutex> lock(g_listener_mutex);
++    g_listener_fd = fd;
++  }
++
++  ~ListenerRegistration() {
++    std::lock_guard<std::mutex> lock(g_listener_mutex);
++    g_listener_fd = kInvalidSocket;
++    if (fd != kInvalidSocket) close_socket(fd);
++  }
++
++  ListenerRegistration(const ListenerRegistration&) = delete;
++  ListenerRegistration& operator=(const ListenerRegistration&) = delete;
++};
++
++/// 等监听套接字可读，最多 wait_ms 毫秒。返回 >0 可读、0 超时、<0 出错。
++int wait_readable(socket_t fd, int wait_ms) {
++#ifdef _WIN32
++  WSAPOLLFD entry{};
++  entry.fd = fd;
++  entry.events = POLLRDNORM;
++  return ::WSAPoll(&entry, 1, wait_ms);
++#else
++  pollfd entry{};
++  entry.fd = fd;
++  entry.events = POLLIN;
++  return ::poll(&entry, 1, wait_ms);
++#endif
++}
++
+ void set_io_timeout(socket_t fd, int seconds) {
+ #ifdef _WIN32
+   const DWORD ms = static_cast<DWORD>(seconds) * 1000;
+@@ -494,7 +556,20 @@ void open_browser(const std::string& url) {
+ 
+ }  // namespace
+ 
+-Result<void> run(const ServerOptions& opts) {
++void request_stop() noexcept {
++  g_stop_requested.store(true, std::memory_order_release);
++  // 「取 fd + shutdown」和「注销 + close」必须互斥，否则可能 shutdown 到一个已经被关闭、
++  // 甚至已被系统回收给别的套接字的 fd 号上（见上面那段注释）。
++  std::lock_guard<std::mutex> lock(g_listener_mutex);
++  if (g_listener_fd == kInvalidSocket) return;
++  // 叫醒阻塞中的 accept()：Linux/Android 上对监听套接字 shutdown() 会让它立刻返回。
++  // 失败也无所谓 —— 循环里 poll() 的超时兜底，最坏一个周期后照样退出。
++  ::shutdown(g_listener_fd, SHUT_RDWR);
++}
++
++Result<void> run(const ServerOptions& opts, const ReadyHandler& on_ready) {
++  // 上一次 request_stop() 不该影响这一次启动（同一个进程里服务会反复开关）
++  g_stop_requested.store(false, std::memory_order_release);
+ #ifdef _WIN32
+   WinsockGuard winsock;
+   if (!winsock.ok) return fail("WSAStartup 失败：WinSock 初始化未成功");
+@@ -545,6 +620,10 @@ Result<void> run(const ServerOptions& opts) {
+     return fail("无法监听 " + opts.listen + ":" + port_text + "（端口被占用，或该地址不可用）");
+   }
+ 
++  // 接管 listener 手里的 fd：从这里开始 request_stop() 能找到这个套接字，
++  // 并且 fd 会由它在析构时（锁内）关闭。listener 自此为空守卫。
++  ListenerRegistration registration(listener);
++
+   const std::string url = "http://" + display_host(opts.listen) + ":" + std::to_string(bound_port) + "/";
+   console::write_line(stdout, "Web UI: " + url);
+   console::write_line(stdout, "API: /sub?target=clash&url=<订阅链接>  |  POST /api/convert  |  /api/version  |  /api/rulesets  |  /api/dns");
+@@ -555,12 +634,32 @@ Result<void> run(const ServerOptions& opts) {
+   }
+   if (opts.open_browser) open_browser(url);
+ 
++  // 监听已经成功、端口已经是最终值 —— 现在告诉宿主（Android 的 WebView 拿它拼 URL）。
++  // 必须在 accept 循环之前：宿主拿到端口就会去加载页面，越早越好。
++  if (on_ready) on_ready(url, bound_port);
++
+   int consecutive_errors = 0;
+   for (;;) {
++    if (g_stop_requested.load(std::memory_order_acquire)) return {};
++
++    // 先 poll 再 accept：poll 的超时让「停止」在任何平台上都有确定的退出时机，
++    // 不必依赖「另一个线程能不能把阻塞中的 accept 叫醒」这件平台相关的事。
++    const int ready = wait_readable(registration.fd, 500);
++    if (ready == 0) {
++      consecutive_errors = 0;
++      continue;  // 超时：回到循环头部看停止标志
++    }
++    if (ready < 0) {
++      if (g_stop_requested.load(std::memory_order_acquire)) return {};
++      if (++consecutive_errors >= 16) return fail("poll 连续失败，服务退出");
++      continue;
++    }
++
+     sockaddr_storage peer{};
+     socklen_t peer_len = sizeof(peer);
+-    const socket_t client = ::accept(listener.fd, reinterpret_cast<sockaddr*>(&peer), &peer_len);
++    const socket_t client = ::accept(registration.fd, reinterpret_cast<sockaddr*>(&peer), &peer_len);
+     if (client == kInvalidSocket) {
++      if (g_stop_requested.load(std::memory_order_acquire)) return {};
+       if (++consecutive_errors >= 16) {
+         return fail("accept 连续失败，服务退出");
+       }

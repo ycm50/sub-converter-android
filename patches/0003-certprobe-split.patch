@@ -1,0 +1,71 @@
+diff --git a/src/fetch/certprobe.cpp b/src/fetch/certprobe.cpp
+index 749cdfd..1970912 100644
+--- a/src/fetch/certprobe.cpp
++++ b/src/fetch/certprobe.cpp
+@@ -46,6 +46,8 @@
+ #include <openssl/evp.h>
+ #include <openssl/ssl.h>
+ #include <openssl/x509.h>
++#elif defined(SUBCONV_HAVE_ANDROID_HTTP)
++#include "subconv/android_http.hpp"
+ #endif
+ 
+ namespace subconv::fetch {
+@@ -272,6 +274,29 @@ Result<std::string> probe_peer_cert_sha256(std::string_view host, uint16_t port,
+   return result;
+ }
+ 
++#elif defined(SUBCONV_HAVE_ANDROID_HTTP)
++
++// Android 没有 OpenSSL：握手与取证书交给 Java 的 SSLSocket（用「信任所有」的
++// TrustManager，好让证书与 SNI 对不上时也能拿到链，语义与上游一致），
++// 指纹仍然算在叶子证书的 DER 上，输出格式完全一样。
++Result<std::string> probe_peer_cert_sha256(std::string_view host, uint16_t port,
++                                          std::string_view sni, int timeout_seconds) {
++  return android::probe_peer_cert_sha256(host, port, sni, timeout_seconds);
++}
++
++#else  // 既没有 OpenSSL 也没有 Android 桥
++
++Result<std::string> probe_peer_cert_sha256(std::string_view host, uint16_t port,
++                                          std::string_view sni, int timeout_seconds) {
++  (void)host;
++  (void)port;
++  (void)sni;
++  (void)timeout_seconds;
++  return fail("本次构建未启用证书探测后端（OpenSSL 或 Android 桥），--probe-cert 不可用");
++}
++
++#endif
++
+ std::size_t probe_node_certificates(NodeList& nodes, int timeout_seconds,
+                                     std::vector<std::string>* warnings) {
+   std::map<std::string, std::string> cache;  // host:port|sni -> 指纹（同一次运行内不重复探测）
+@@ -339,27 +364,4 @@ std::size_t probe_node_certificates(NodeList& nodes, int timeout_seconds,
+   return probed;
+ }
+ 
+-#else  // !SUBCONV_HAVE_OPENSSL
+-
+-Result<std::string> probe_peer_cert_sha256(std::string_view host, uint16_t port,
+-                                          std::string_view sni, int timeout_seconds) {
+-  (void)host;
+-  (void)port;
+-  (void)sni;
+-  (void)timeout_seconds;
+-  return fail("本次构建未启用 OpenSSL，无法探测证书指纹（--probe-cert 不可用）");
+-}
+-
+-std::size_t probe_node_certificates(NodeList& nodes, int timeout_seconds,
+-                                    std::vector<std::string>* warnings) {
+-  (void)nodes;
+-  (void)timeout_seconds;
+-  if (warnings != nullptr) {
+-    warnings->push_back("本次构建未启用 OpenSSL，--probe-cert 被忽略");
+-  }
+-  return 0;
+-}
+-
+-#endif  // SUBCONV_HAVE_OPENSSL
+-
+ }  // namespace subconv::fetch

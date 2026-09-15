@@ -1,0 +1,76 @@
+diff --git a/src/fetch/http.cpp b/src/fetch/http.cpp
+index 899038e..72af4c7 100644
+--- a/src/fetch/http.cpp
++++ b/src/fetch/http.cpp
+@@ -1,4 +1,9 @@
+-// libcurl HTTP 客户端封装
++// HTTP 客户端封装
++//
++// 后端二选一，由编译期开关决定，上层（重试 / 嗅探 / 缓存 / emit）完全无感：
++//   * 桌面 / CLI：libcurl（上游的写法，SUBCONV_HAVE_CURL）
++//   * Android   ：转调 Java 的 HttpURLConnection（NDK 不带 libcurl）
++//                 —— 见 src/fetch/android_http.cpp
+ #include "subconv/fetch.hpp"
+ 
+ #include <algorithm>
+@@ -15,6 +20,8 @@
+ 
+ #ifdef SUBCONV_HAVE_CURL
+ #include <curl/curl.h>
++#elif defined(SUBCONV_HAVE_ANDROID_HTTP)
++#include "subconv/android_http.hpp"
+ #endif
+ 
+ namespace subconv::fetch {
+@@ -183,16 +190,23 @@ const std::string* HttpResponse::header(std::string_view name) const noexcept {
+ bool http_available() noexcept {
+ #ifdef SUBCONV_HAVE_CURL
+   return true;
++#elif defined(SUBCONV_HAVE_ANDROID_HTTP)
++  // Android 上「有没有网络能力」取决于 JNI 桥有没有挂好（JNI_OnLoad 是否跑过），
++  // 所以这里问一次桥，而不是无脑 true —— /api/version 里那个 curl 字段就是它，
++  // Web UI 靠它决定要不要提示「URL 抓取不可用」。
++  return android::ready();
+ #else
+   return false;
+ #endif
+ }
+ 
+ std::string resolved_ca_bundle() {
+-#ifdef SUBCONV_HAVE_CURL
++#if defined(SUBCONV_HAVE_CURL)
+   ensure_global();
+   return ca_bundle_path();
+ #else
++  // Android 侧用系统信任的 CA（HttpURLConnection / SSLSocket 自己管），
++  // 没有「CA bundle 路径」这个概念，空串就是「不干预」。
+   return {};
+ #endif
+ }
+@@ -282,10 +296,25 @@ Result<HttpResponse> http_get(const std::string& url, const HttpOptions& opts) {
+                 (preview.empty() ? std::string() : " 响应片段: " + preview));
+   }
+   return response;
++#elif defined(SUBCONV_HAVE_ANDROID_HTTP)
++  // 与上面 libcurl 那条路保持同样的分工：android::http_get() 只负责「把请求发出去」，
++  // 非 2xx 算不算失败由这里定 —— 这样两条后端的报错文案、重试行为完全一致。
++  auto response = android::http_get(url, opts);
++  if (!response) return fail(response.error().message);
++
++  if (response->status < 200 || response->status >= 300) {
++    std::string preview = response->body.substr(0, 160);
++    for (char& c : preview) {
++      if (c == '\n' || c == '\r' || c == '\t') c = ' ';
++    }
++    return fail("HTTP " + std::to_string(response->status) + " (GET " + url + ")" +
++                (preview.empty() ? std::string() : " 响应片段: " + preview));
++  }
++  return response;
+ #else
+   (void)url;
+   (void)opts;
+-  return fail("本次构建未启用 libcurl，无法抓取订阅 URL（请用本地文件，或重新配置构建）");
++  return fail("本次构建未启用任何 HTTP 后端，无法抓取订阅 URL（请用本地文件，或重新配置构建）");
+ #endif
+ }
+ 
