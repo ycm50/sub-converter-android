@@ -167,7 +167,9 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
       out["protocol"] = "vless";
       Json user = Json::object();
       user["id"] = n.uuid;
-      user["encryption"] = "none";
+      // Xray 的 encryption 不能留空：不加密要显式写 "none"；开了 VLESS Encryption 就得把
+      // 那串 mlkem768x25519plus.… 原样写进去，否则服务端解不开 VLESS 头（静默黑洞）。
+      user["encryption"] = n.encryption.empty() ? std::string("none") : n.encryption;
       if (!n.flow.empty()) user["flow"] = n.flow;
       user["level"] = 0;
       Json vnext = Json::object();

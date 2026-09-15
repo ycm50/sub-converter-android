@@ -9,7 +9,7 @@ HTTP 服务 + 内嵌 Web UI；本 App 要做的正是这件事：启动即等价
 |---|---|
 | 上游仓库 | `https://github.com/ycm50/sub-converter` |
 | 分支 | `main` |
-| 移植基线 commit | `7ef9a567a4aec653cb5c7f2fbf17e0f9e3a1f2d7`（2026-09-13） |
+| 移植基线 commit | `67fba3ac4b28038fe02a71cf81a8ea6f59d14387`（2026-09-15） |
 | 上游版本 | 0.1.0 |
 | 移植日期 | 2026-09-14 |
 

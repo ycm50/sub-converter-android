@@ -146,6 +146,9 @@ struct ProxyNode {
   // 协议特有
   int alter_id = 0;                 ///< vmess
   std::string flow;                 ///< vless: xtls-rprx-vision
+  /// vless: Xray 的 VLESS Encryption（`mlkem768x25519plus.外观.RTT.padding.认证参数`）。
+  /// 空串 = `none`。解析/校验见 include/subconv/vless_encryption.hpp。
+  std::string encryption;
   std::string packet_encoding;      ///< xray: xudp / packetaddr
   std::string ssr_protocol;         ///< ssr: origin / auth_chain_a / auth_aes128_md5 ...
   std::string ssr_protocol_param;

@@ -1,14 +1,8 @@
 # 上游锚点（移植基线）
 #
-# ./gradlew syncUpstream 默认同步到这个 commit（构建前也会自动同步一次）。
-# 改这一行 = 声明移植基线前移，改完请跑一次同步并把结果一起提交。
+# syncUpstream 任务默认同步到这个 commit。改这一行 = 声明移植基线前移，
+# 改完请跑一次 ./gradlew syncUpstream 并把结果一起提交。
 #
-# 当前值就是 UPSTREAM.md 里写的那个移植基线（2026-09-13）。
+# 上一次同步：2026-09-15  67fba3a feat: 解析并透传 VLESS Encryption（encryption=mlkem768x25519plus.…）
 #
-# 已知待跟进：上游 67fba3ac4b28038fe02a71cf81a8ea6f59d14387
-#   「feat: 解析并透传 VLESS Encryption（encryption=mlkem768x25519plus.…）」
-#   还没同步进来。跟进命令：
-#     ./gradlew syncUpstream -Psubconv.ref=67fba3a -Psubconv.updatePin=true
-#   注意：那个 commit 新增了 src/core/vless_encryption.cpp，任务会警告它没进
-#   CMakeLists.txt 的源文件列表 —— 必须手工加上，否则链接会崩。
-7ef9a567a4aec653cb5c7f2fbf17e0f9e3a1f2d7
+67fba3ac4b28038fe02a71cf81a8ea6f59d14387

@@ -114,7 +114,7 @@ bool build_ss_plugin(const ProxyNode& n, std::string& plugin, std::string& opts)
 }
 
 Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
-  auto reject = [&](const char* why) {
+  auto reject = [&](std::string why) {
     warnings.push_back(std::string("跳过节点 ") + n.name + "（" + to_string(n.protocol) +
                        "）：sing-box " + why);
     return Json();
@@ -163,6 +163,14 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
       break;
     }
     case Protocol::Vless: {
+      // sing-box 的 vless 出站没有 encryption 字段（官方文档 OutboundVLESSOptions 里只有
+      // uuid / flow / network / tls / transport / multiplex / packet_encoding），也就是它
+      // 至今没实现 VLESS Encryption —— `mlkem768x25519plus` 只存在于 Xray 与 mihomo 系内核。
+      // 与其产出一个「能过 sing-box check、连上却必然黑洞」的节点，不如跳过并告知。
+      if (!n.encryption.empty()) {
+        return reject("没有 VLESS Encryption（encryption=" + n.encryption.substr(0, 32) +
+                      "…，这是 Xray/mihomo 的扩展）；该节点请用 -t clash 或 -t xray");
+      }
       out["type"] = "vless";
       out["server"] = n.server;
       out["server_port"] = n.port;

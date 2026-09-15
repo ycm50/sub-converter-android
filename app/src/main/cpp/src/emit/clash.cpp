@@ -295,6 +295,9 @@ Yaml build_proxy(const ProxyNode& n, const EmitOptions& opts,
       y.set("uuid", Yaml::scalar(n.uuid));
       if (opts.udp && n.udp) y.set("udp", Yaml::boolean(true));
       if (!n.flow.empty()) y.set("flow", Yaml::scalar(n.flow));
+      // VLESS Encryption（`mlkem768x25519plus.…`）：mihomo 的 vless 出站认这个字段，
+      // 且必须原样带给内核 —— 少了它服务端解不开 VLESS 头，节点会变成「连上但没数据」。
+      if (!n.encryption.empty()) y.set("encryption", Yaml::scalar(n.encryption));
       add_transport(y, n);
       add_tls(y, n, TlsStyle::VmessVless, legacy);
       if (!n.packet_encoding.empty()) {

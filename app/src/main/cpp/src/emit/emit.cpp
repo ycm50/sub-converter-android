@@ -2,10 +2,12 @@
 #include <array>
 #include <set>
 #include <string>
+#include <utility>
 
 #include "emit_internal.hpp"
 #include "subconv/codec.hpp"
 #include "subconv/types.hpp"
+#include "subconv/vless_encryption.hpp"
 
 namespace subconv {
 
@@ -37,9 +39,12 @@ NodeList prepare_nodes(const NodeList& nodes, const EmitOptions& opts) {
 
   for (const auto& node : nodes) {
     if (opts.dedup) {
+      // encryption 也是「同一个服务端上不同的节点」的区分维度：同一个 server:port:uuid
+      // 配不同的 VLESS Encryption 参数/密钥就是两条不同的线路，不能当成重复项删掉。
       const std::string fingerprint = std::string(to_string(node.protocol)) + "|" +
                                       node.server + "|" + std::to_string(node.port) + "|" +
-                                      node.uuid + "|" + node.password + "|" + node.cipher;
+                                      node.uuid + "|" + node.password + "|" + node.cipher + "|" +
+                                      node.encryption;
       if (!seen_fingerprint.insert(fingerprint).second) continue;
     }
 
@@ -124,6 +129,16 @@ Result<std::string> emit_config(const NodeList& nodes, const EmitOptions& opts,
   if (target.empty()) {
     return fail("无法识别的输出目标: " + opts.target +
                 "（已实现: " + codec::join(implemented_targets(), ", ") + "）");
+  }
+
+  // VLESS Encryption / XTLS Vision 的可移植性告警：这类问题在客户端上的表现都是
+  // 「连上了但没有数据 / 全部 -1」，光看配置根本看不出来，所以在这里统一提示一次，
+  // 与具体输出目标无关（各渲染器只负责把参数照抄过去）。
+  if (warnings != nullptr) {
+    for (const auto& node : nodes) {
+      std::string warning = vless_encryption_warning(node);
+      if (!warning.empty()) warnings->push_back(std::move(warning));
+    }
   }
 
   if (target == "clash") return emit_clash(nodes, opts, warnings);

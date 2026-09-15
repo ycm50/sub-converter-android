@@ -159,8 +159,11 @@ CI 上走的就是这条路。
 
 | 项 | 条件 | 结果 |
 |---|---|---|
-| 同步回归（当前锚点） | 锚点 `7ef9a56`，同步进一份 149 文件的副本 `-Psubconv.cppDir=...`，全部走**默认参数** | 副本与 `app/src/main/cpp` **149/149 逐字节一致**（0 差异、0 单边文件），自检「差异恰好等于补丁集」 |
-| 同步回归（跟进上游） | `-Psubconv.ref=67fba3a` | 4 个补丁全 `OK`；新增 2（`vless_encryption.hpp/.cpp`）、覆盖 13；自检干净；**CMakeLists 警告正确报出 `src/core/vless_encryption.cpp`** |
+| 同步回归（移植基线） | 锚点 `7ef9a56`，同步进一份 149 文件的副本 `-Psubconv.cppDir=...`，全部走**默认参数** | 副本与 `app/src/main/cpp` **149/149 逐字节一致**（0 差异、0 单边文件），自检「差异恰好等于补丁集」 |
+| 同步回归（跟到 67fba3a） | `-Psubconv.ref=67fba3a -Psubconv.updatePin=true -Psubconv.strict=true` | 写入 15 个（覆盖 13 / 新增 2）、删除 0；4 个补丁全 `OK`；自检「与上游不同：5 个（补丁覆盖：5 个）✅」；锚点前移，第二次跑走快路径（`新增 0 覆盖 5`、一个字节不动） |
+| 漂移探针（先响、后修） | 加 `CMakeLists.txt` 那一行**之前**，CI 上 `-Psubconv.strict=true` | `:syncUpstream` 直接红：`同步结果不自洽 —— CMakeLists.txt 的源文件列表和上游对不上：src/core/vless_encryption.cpp`；补上该行后同一检查静默通过 |
+| release 三 ABI（= CI 那条路） | 同步到 `67fba3a` 后 `./gradlew :app:assembleRelease` | **BUILD SUCCESSFUL in 1m 43s**；APK 5,894,826 B（5.6 MiB）；`buildCMakeRelWithDebInfo[arm64-v8a/armeabi-v7a/x86_64]` 三个全过；stripped `.so` 1.82 / 1.26 / 1.87 MiB |
+| APK 内核校验（release） | `./gradlew verifyKernel`（这次对着 `app-release-unsigned.apk`） | 三个 ABI 全 `OK`、无 `libc++_shared.so` |
 | 构建即同步（默认开） | `./gradlew :app:assembleDebug` | 任务图里 `:syncUpstream` 排在 `preBuild` 之前；工作区已干净时打印「跳过写入与套补丁」，5 个补丁目标文件 **mtime 一个都没动**，native 侧照旧 `UP-TO-DATE` |
 | 构建即同步（关掉） | `-Psubconv.syncOnBuild=false` | 任务图里没有 `:syncUpstream` |
 | APK 内核校验 | `./gradlew verifyKernel`（对着 `app-debug.apk`） | 三个 ABI 的 `libsubconv.so` 都在、没有 `libc++_shared.so`，全部通过 |

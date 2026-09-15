@@ -6,7 +6,7 @@
 //
 //   ./gradlew syncUpstream                              同步到 tools/upstream-ref.txt 的锚点
 //   ./gradlew syncUpstream -Psubconv.dryRun=true         只看差多少，一个字都不写
-//   ./gradlew syncUpstream -Psubconv.ref=67fba3a -Psubconv.updatePin=true
+//   ./gradlew syncUpstream -Psubconv.ref=<上游 commit> -Psubconv.updatePin=true
 //   ./gradlew syncUpstream -Psubconv.fetch=true          先 git fetch（本地克隆）或克隆/更新
 //   ./gradlew verifyKernel                               核对 APK 里三个 ABI 的 .so
 //
@@ -290,7 +290,7 @@ abstract class SyncUpstreamTask @Inject constructor(
         } else {
             needAdd.forEach { logger.error("  ⚠ 上游新增的源文件没进 CMakeLists，会把链接搞崩：$it") }
             needDrop.forEach { logger.error("  ⚠ CMakeLists 里列了、但上游已经没有的源文件：$it") }
-            logger.lifecycle("  请手工改 app/src/main/cpp/CMakeLists.txt 的 subconv_core 源文件列表（保持字母序）。")
+            logger.lifecycle("  请手工改 app/src/main/cpp/CMakeLists.txt 的 subconv_core 源文件列表（插在跟上游 CMakeLists.txt 相同的位置）。")
         }
         val androidExtra = listed.filter { !upstreamCpp.contains(it) }
         logger.lifecycle("  CMakeLists 里 Android 自己加的源文件：${if (androidExtra.isEmpty()) "（无）" else androidExtra.joinToString(", ")}")
@@ -329,7 +329,7 @@ abstract class SyncUpstreamTask @Inject constructor(
         // undefined reference，排查成本比这里红一条高得多。
         if (strict.get() && (needAdd.isNotEmpty() || needDrop.isNotEmpty())) {
             problems += "CMakeLists.txt 的源文件列表和上游对不上：${(needAdd + needDrop).joinToString(", ")}" +
-                "（在 app/src/main/cpp/CMakeLists.txt 里手工加/删，保持字母序）"
+                "（在 app/src/main/cpp/CMakeLists.txt 里手工加/删，位置照上游 CMakeLists.txt 的排列）"
         }
         if (!dry) {
             val onlyPatch = drift.filter { !expected.contains(it) }

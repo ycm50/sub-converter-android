@@ -8,6 +8,7 @@
 #include "parsers.hpp"
 #include "subconv/codec.hpp"
 #include "subconv/convert.hpp"
+#include "subconv/vless_encryption.hpp"
 
 #ifdef SUBCONV_HAVE_YAML
 #include <yaml-cpp/yaml.h>
@@ -293,6 +294,9 @@ Result<ProxyNode> proxy_from_yaml(const YamlNode& p) {
     case Protocol::Vless: {
       node.uuid = ystr(p, "uuid");
       node.flow = ystr(p, "flow");
+      // VLESS Encryption：上游（mihomo / 本工具 clash 目标）会写成同名的 proxy 字段，
+      // 读回来才能做到「Clash YAML 进 → Xray/分享链接出」不丢参数。
+      node.encryption = normalize_vless_encryption(ystr(p, "encryption"));
       apply_transport_from_yaml(node, p);
       apply_tls_from_yaml(node, p);
       node.tls.enabled = true;  // vless 在 Clash 里恒为 TLS（含 reality）

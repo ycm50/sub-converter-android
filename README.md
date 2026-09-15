@@ -203,9 +203,13 @@ appcompat / material 都不需要）都已在 `~/.gradle/caches` 里，NDK 与 C
   `./gradlew syncUpstream -Psubconv.ref=<新> -Psubconv.updatePin=true` 再提交。
 * **所以 CI 同时是"上游漂移的探针"**：上游一动到我们的 `patches/` 或 `CMakeLists.txt` 源文件
   列表跟不上的地方，CI 就会红（这是有意的 —— 它比"本地一直编旧代码、直到某天跟进才发现"
-  早很多）。当前上游 `67fba3a` 新增了 `src/core/vless_encryption.cpp`，本仓库还没跟进，
-  所以在补齐之前，**默认（= 上游最新）那一次 CI 就是会红的**：要么把 CMakeLists 那一行补上
-  并前移锚点，要么 `upstream_ref` 填锚点 `7ef9a56…`。
+  早很多）。**这个探针 2026-09-15 真的响过一次**：上游 `67fba3a` 新增了
+  `src/core/vless_encryption.cpp`，而 `CMakeLists.txt` 的源文件列表没跟上，CI
+  （run [`34965819439`](https://github.com/ycm50/sub-converter-android/actions/runs/34965819439)）
+  就在 `:syncUpstream` 上红了 —— `-Psubconv.strict=true` 报「同步结果不自洽 ——
+  CMakeLists.txt 的源文件列表和上游对不上：src/core/vless_encryption.cpp」，**一个字都没编到**。
+  补法就是上面那两条「真跟进」命令（补 CMakeLists 那一行 + `-Psubconv.updatePin=true`），
+  补完即恢复：现在仓库锚点已经是 `67fba3a`（= 修复时的上游 HEAD）。
 * **`-Psubconv.strict=true` 只开在 CI**：CMakeLists 的源文件列表和上游对不上时直接失败。
   默认关（平时只是警告）—— 但 CI 每次拿的都是上游最新，等链接期报 undefined reference
   再排查，比在这里红一条贵得多。
@@ -444,7 +448,12 @@ ninja 一看到它就会把几十个 TU 全量重编一遍。
   `app/build/outputs/apk/debug/app-debug.apk`（9.3 MiB，三个 ABI 的 `libsubconv.so` 都在），
   `./gradlew verifyKernel` 对着这个 APK 全过；同步挂在构建上这条链也实测过
   （`./gradlew :app:assembleDebug` 会先跑 `syncUpstream`，工作区已经干净时它一个字节都不动，
-  后面 ninja 该 UP-TO-DATE 还是 UP-TO-DATE）。CI（GitHub Actions）那条路**还没有在 CI 上真正跑过**。
+  后面 ninja 该 UP-TO-DATE 还是 UP-TO-DATE）。
+* **release 那条路（= CI 跑的那条）也实测过**：同步到上游 `67fba3a` 之后
+  `./gradlew :app:assembleRelease` → **BUILD SUCCESSFUL in 1m 43s**，出
+  `app/build/outputs/apk/release/app-release-unsigned.apk`（5,894,826 B ≈ 5.6 MiB），
+  `./gradlew verifyKernel` 对着**它**三个 ABI 全 `OK`、没有 `libc++_shared.so`。
+  CI 那边也已经真跑过，见「手动构建」一节。
 * C++ 侧还可以不打开 Studio 独立验证：`tools\build-native.ps1` 用同一份 NDK/CMake
   编出三份 `libsubconv.so`，本机实测三个 ABI 全过（`e_machine` 正确、`DT_NEEDED` 里
   只有 `liblog/libm/libdl/libc`、6 个 JNI 符号齐全，明细见 `tools/README.md`）。
@@ -453,7 +462,7 @@ ninja 一看到它就会把几十个 TU 全量重编一遍。
 * workflow 里那三步签名命令（`keytool -genkeypair` / `zipalign -f -p 4` / `apksigner sign`）
   用同一版 `build-tools;36.1.0` 在本机对着 debug APK 的**副本**预演过：签完
   `apksigner verify` 报 v2 + v3 通过（minSdk 24，v1 JAR 签名按 apksigner 的默认值关掉）。
-  但这个 workflow **还没有在 CI 上真正跑过**。
+  但**签名这三步在 CI 上还没真跑过** —— 2026-09-15 那次 CI 卡在上游同步，没走到签名。
 * 签名密钥每次构建现生成 ⇒ 每次签名都不同 ⇒ **覆盖安装会失败**，必须先卸载（会清掉 Web UI
   的 localStorage）。要稳定签名就得换成固定密钥，见「手动构建」一节。
 * `port` 随机分配，所以每次冷启动端口都不同 —— 这是刻意的，不是 bug（想在电脑上访问这个

@@ -123,6 +123,7 @@ add_library(subconv_core STATIC
   src/core/types.cpp
   src/core/fsutil.cpp
   src/core/console.cpp
+  src/core/vless_encryption.cpp
   src/codec/base64.cpp
   src/codec/url.cpp
   src/parse/ss.cpp

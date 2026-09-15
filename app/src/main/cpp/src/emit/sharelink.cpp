@@ -19,6 +19,7 @@
 #include "emit_internal.hpp"
 #include "subconv/codec.hpp"
 #include "subconv/json.hpp"
+#include "subconv/vless_encryption.hpp"
 
 namespace subconv {
 namespace {
@@ -202,8 +203,10 @@ std::optional<std::string> build_vless(const ProxyNode& node) {
   if (node.uuid.empty()) return std::nullopt;
 
   Query q;
-  q_add(q, "encryption", extra_of(node, "encryption").empty() ? std::string("none")
-                                                             : extra_of(node, "encryption"));
+  // 开了 VLESS Encryption 就把原串回写（v2rayNG / v2rayN 的 `encryption=` 就是原样透传）；
+  // 没开则显式写 none —— 这个字段不能省，客户端留空会当成无效配置。
+  const std::string encryption = vless_encryption_of(node);
+  q_add(q, "encryption", encryption.empty() ? std::string("none") : encryption);
   if (node.tls.reality) {
     q_add(q, "security", "reality");
   } else {
@@ -405,11 +408,13 @@ std::optional<std::string> build_v2rayn_item(const ProxyNode& node) {
     case Protocol::Shadowsocks:
       proto["SsMethod"] = node.cipher;
       break;
-    case Protocol::Vless:
-      proto["VlessEncryption"] =
-          extra_of(node, "encryption").empty() ? "none" : extra_of(node, "encryption");
+    case Protocol::Vless: {
+      // v2rayN 的 InnerFmt 把这一项叫 VlessEncryption，值同样是原样透传
+      const std::string encryption = vless_encryption_of(node);
+      proto["VlessEncryption"] = encryption.empty() ? std::string("none") : encryption;
       proto["Flow"] = node.flow;
       break;
+    }
     case Protocol::Hysteria2:
       proto["SalamanderPass"] = node.obfs_password;
       proto["UpMbps"] = leading_int(node.up);
