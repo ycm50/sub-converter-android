@@ -57,17 +57,19 @@ Result<HttpResponse> http_get_with_retry(const std::string& url, const HttpOptio
 // 内容嗅探
 // ---------------------------------------------------------------------------
 enum class ContentKind {
-  ShareLinks,   ///< 分享链接列表（可能被 Base64 包裹）
-  ClashYaml,    ///< Clash / mihomo 配置
-  JsonConfig,   ///< sing-box / Xray / v2ray JSON 配置
-  Html,         ///< 网页（通常是机场错误页）
+  ShareLinks,    ///< 分享链接列表（可能被 Base64 包裹）
+  ClashYaml,     ///< Clash / mihomo 配置（含 JSON 方言）
+  XrayJson,      ///< Xray / V2Ray 的 JSON 客户端配置（含「每份一个节点」的数组形态）
+  JsonConfig,    ///< 其它 JSON 配置（sing-box / v2ray），暂不支持
+  WireGuardConf, ///< 标准 WireGuard 客户端配置（`[Interface]` / `[Peer]`）
+  Html,          ///< 网页（通常是机场错误页）
   Unknown,
 };
 
 [[nodiscard]] ContentKind sniff_content(std::string_view body, std::string_view content_type = {});
 
-/// 按嗅探结果分派解析：Clash YAML / 分享链接（含 Base64 包裹）；
-/// HTML 与 JSON 配置给出针对性报错而不是一堆语法错。
+/// 按嗅探结果分派解析：Clash YAML / Xray JSON / 分享链接（含 Base64 包裹）；
+/// HTML 与其它 JSON 配置给出针对性报错而不是一堆语法错。
 [[nodiscard]] Result<Subscription> parse_content(std::string_view body, std::string source,
                                                  std::string_view content_type = {});
 
@@ -118,5 +120,9 @@ Result<Subscription> parse_subscription(std::string_view raw, std::string source
 
 /// 从 Clash YAML 解析节点 —— 定义在 parse/clash_yaml.cpp
 Result<Subscription> parse_clash_yaml(std::string_view yaml, std::string source);
+
+/// 从 Xray / V2Ray 的 JSON 客户端配置解析节点 —— 定义在 parse/xray_json.cpp。
+/// 既收单份配置对象，也收「每份配置一个节点」的数组（BPB 面板 `?app=xray` 的形态）。
+Result<Subscription> parse_xray_json(std::string_view json, std::string source);
 
 }  // namespace subconv

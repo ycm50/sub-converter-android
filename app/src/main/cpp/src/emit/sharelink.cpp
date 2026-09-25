@@ -2,9 +2,11 @@
 //
 // 依据 v2rayNG 源码（2dust/v2rayNG，AngConfigManager 的 configFmtParsers）确定可导入的 scheme：
 //   vmess://  ss://  socks://(socks4:// socks5://)  trojan://  vless://  hysteria2://(hy2://)
-//   wireguard://
-// 明确**不支持**：ssr://、snell://、hysteria://(v1)、tuic://、http:// 链接
+// 明确**不支持**：ssr://、snell://、hysteria://(v1)、tuic://、http:// 链接、**wireguard://**
 //   —— 这些节点会被跳过并汇总成告警，而不是产出对方打不开的链接。
+//   注意 WireGuard 与上面几个不同：它不是「v2rayNG 不认这个 scheme」，而是**v2rayNG 完全不支持
+//   WireGuard 协议**（configFmt 里没有 WG 解析器）。本工具仍会为 `links` / `base64` 产出自己
+//   定义的 `wireguard://`（供本工具与其它能读它的客户端往返），要喂 v2rayN 请用 `-t v2rayn`。
 //
 // 目标：
 //   links  —— 每行一条分享链接（v2rayNG「从剪贴板导入」、也可直接看）
@@ -20,6 +22,7 @@
 #include "subconv/codec.hpp"
 #include "subconv/json.hpp"
 #include "subconv/vless_encryption.hpp"
+#include "../parse/wireguard_common.hpp"
 
 namespace subconv {
 namespace {
@@ -41,6 +44,18 @@ std::string q_string(const Query& q) {
     out += key;
     out.push_back('=');
     out += codec::percent_encode(value);
+  }
+  return out;
+}
+
+/// WARP 的 `reserved` 在各客户端里的通用载体是**逗号分隔的十进制**（v2rayN 的
+/// `ProfileItem.Reserved` / v2rayNG 的 `config.reserved` 都是这个字符串形式），
+/// 分享链接与 v2rayn:// 载荷都用它。
+std::string reserved_decimal(const std::vector<int>& reserved) {
+  std::string out;
+  for (const int byte : reserved) {
+    if (!out.empty()) out.push_back(',');
+    out += std::to_string(byte);
   }
   return out;
 }
@@ -322,6 +337,7 @@ int v2rayn_config_type(Protocol protocol) {
     case Protocol::Vless: return 5;
     case Protocol::Trojan: return 6;
     case Protocol::Hysteria2: return 7;
+    case Protocol::WireGuard: return 9;
     case Protocol::Http: return 10;
     default: return 0;
   }
@@ -337,6 +353,7 @@ const char* v2rayn_type_name(Protocol protocol) {
     case Protocol::Vless: return "vless";
     case Protocol::Trojan: return "trojan";
     case Protocol::Hysteria2: return "hysteria2";
+    case Protocol::WireGuard: return "wireguard";
     case Protocol::Http: return "http";
     default: return nullptr;
   }
@@ -370,6 +387,11 @@ std::optional<std::string> build_v2rayn_item(const ProxyNode& node) {
   if (type_name == nullptr || config_type == 0 || node.server.empty() || node.port == 0) {
     return std::nullopt;
   }
+  // WireGuard 的凭据在 node.wireguard 里（`Password` 是空的），缺了就没法生成可用配置。
+  if (node.protocol == Protocol::WireGuard &&
+      (node.wireguard.private_key.empty() || node.wireguard.peers.empty())) {
+    return std::nullopt;
+  }
 
   Json item = Json::object();
   item["IndexId"] = node.name;   // 必须唯一：v2rayNG 按它去重
@@ -394,10 +416,16 @@ std::optional<std::string> build_v2rayn_item(const ProxyNode& node) {
   item["ShortId"] = node.tls.reality_short_id;
   item["SpiderX"] = extra_of(node, "spiderX");
   item["CertSha"] = pinned_cert(node);
-  // vmess / vless 把 UUID 放在 Password；其余协议放各自的口令
-  item["Password"] = (node.protocol == Protocol::Vmess || node.protocol == Protocol::Vless)
-                         ? node.uuid
-                         : node.password;
+  // vmess / vless 把 UUID 放在 Password；其余协议放各自的口令。
+  // WireGuard 的「口令」就是客户端私钥（v2rayN / v2rayNG 的 toProfileItem 里
+  // secretKey = Password），所以这里也走 Password。
+  if (node.protocol == Protocol::WireGuard) {
+    item["Password"] = wireguard_detail::pad_key_base64(node.wireguard.private_key);
+  } else {
+    item["Password"] =
+        (node.protocol == Protocol::Vmess || node.protocol == Protocol::Vless) ? node.uuid
+                                                                              : node.password;
+  }
 
   Json proto = Json::object();
   switch (node.protocol) {
@@ -408,6 +436,34 @@ std::optional<std::string> build_v2rayn_item(const ProxyNode& node) {
     case Protocol::Shadowsocks:
       proto["SsMethod"] = node.cipher;
       break;
+    case Protocol::WireGuard: {
+      // v2rayN / v2rayNG 的 V2rayNProtocolExtraShareItem 里，WireGuard 专用字段统一带 `Wg`
+      // 前缀（见 V2rayNShareItem.kt / ProtocolExtraItem.cs）：
+      //   WgPublicKey / WgPresharedKey / WgInterfaceAddress / WgReserved / WgMtu（+ WgDns，仅 v2rayN）
+      // 而 endpoint 与私钥走通用字段：Address / Port / Password。
+      // `WgReserved` 是**逗号分隔的十进制字符串**（ProfileItem.Reserved 就是这个类型），
+      // 不是数组 —— 老版本这里写成数组会让反序列化直接失败。
+      const WireGuardOptions& wg = node.wireguard;
+      const WireGuardPeer& peer = wg.peers.front();
+      std::string interface_address;
+      for (const std::string& piece : {wg.ip, wg.ipv6}) {
+        if (piece.empty()) continue;
+        if (!interface_address.empty()) interface_address.push_back(',');
+        interface_address += piece;
+      }
+      proto["WgPublicKey"] = wireguard_detail::pad_key_base64(peer.public_key);
+      proto["WgPresharedKey"] = peer.pre_shared_key.empty()
+                                    ? std::string()
+                                    : wireguard_detail::pad_key_base64(peer.pre_shared_key);
+      proto["WgInterfaceAddress"] = interface_address;
+      if (peer.reserved.size() == 3) proto["WgReserved"] = reserved_decimal(peer.reserved);
+      proto["WgMtu"] = wg.mtu;
+      // WgDns 只有 v2rayN 认；v2rayNG 的 share item 里没有这个字段，写了它也不读（无害）。
+      if (!wg.dns.empty()) proto["WgDns"] = codec::join(wg.dns, ",");
+      // allowed-ips 在 v2rayn:// 里没有对应字段：两个客户端都是从这个节点的 address 推导
+      // （有 v6 → 0.0.0.0/0 + ::/0），所以这里不写、也不能写，推导结果与 address 一致。
+      break;
+    }
     case Protocol::Vless: {
       // v2rayN 的 InnerFmt 把这一项叫 VlessEncryption，值同样是原样透传
       const std::string encryption = vless_encryption_of(node);
@@ -448,6 +504,75 @@ std::optional<std::string> build_v2rayn_item(const ProxyNode& node) {
 }
 
 // ---------------------------------------------------------------------------
+// WireGuard
+// ---------------------------------------------------------------------------
+// `wireguard://` 不是某个规范定义的，而是 2dust 家客户端（v2rayN / v2rayNG）的事实约定，
+// 两端都实现了它（v2rayNG 的 fmt/WireguardFmt.kt 明确有 parse / toUri），所以这里**按它的
+// 字段约定原样产出**，而不是自定义一套：
+//   userinfo = 客户端私钥（percent-encoded，base64 里的 + / = 必须编码）
+//   host:port = peer endpoint（IPv6 用方括号）
+//   ?publickey= ?presharedkey= ?reserved= ?address= ?mtu= ?dns= ?fm=
+//     * `reserved` 是**逗号分隔的十进制**（"209,98,59"），不是 base64（v2rayN 的 Reserve 就是这个字符串）
+//     * `address` 一栏同时装 IPv4 和 IPv6（逗号分隔），**没有独立的 ipv6 参数**
+//     * 两端都不读 `allowedips`：v2rayNG 由 address 是否含 v6 推导 allowed-ips，
+//       所以只有它与这个推导结果不一致时才写出来（写了也不影响对方）
+//   fragment = 节点名
+const char* kShareKeyOrder[] = {"publickey", "presharedkey", "reserved", "address", "mtu", "dns"};
+
+std::optional<std::string> build_wireguard(const ProxyNode& node) {
+  const WireGuardOptions& wg = node.wireguard;
+  if (wg.private_key.empty() || wg.peers.empty()) return std::nullopt;
+  const WireGuardPeer& peer = wg.peers.front();
+  if (peer.public_key.empty() || peer.server.empty() || peer.port == 0) return std::nullopt;
+
+  std::map<std::string, std::string> params;
+  std::string address;
+  for (const std::string& piece : {wg.ip, wg.ipv6}) {
+    if (piece.empty()) continue;
+    if (!address.empty()) address.push_back(',');
+    address += piece;
+  }
+  if (!address.empty()) params["address"] = address;
+  // 分享链接里的密钥统一补回 '='（v2rayN / v2rayNG 导出的链接都是带 padding 的形态）
+  params["publickey"] = wireguard_detail::pad_key_base64(peer.public_key);
+  if (!peer.pre_shared_key.empty()) {
+    params["presharedkey"] = wireguard_detail::pad_key_base64(peer.pre_shared_key);
+  }
+  if (peer.reserved.size() == 3) params["reserved"] = reserved_decimal(peer.reserved);
+  if (wg.mtu > 0) params["mtu"] = std::to_string(wg.mtu);
+  if (!wg.dns.empty()) params["dns"] = codec::join(wg.dns, ",");
+
+  // allowed-ips 只在「与客户端的推导结果不同」时才写：多写了会被对方忽略，但会污染链接，
+  // 少写了就得靠对方推导（v2rayNG 的规则：有 v6 地址 → 0.0.0.0/0 + ::/0）。
+  if (!peer.allowed_ips.empty()) {
+    std::vector<std::string> implied{"0.0.0.0/0"};
+    if (!wg.ipv6.empty()) implied.push_back("::/0");
+    if (peer.allowed_ips != implied) {
+      params["allowedips"] = codec::join(peer.allowed_ips, ",");
+    }
+  }
+
+  Query q;
+  for (const char* key : kShareKeyOrder) {
+    if (const auto it = params.find(key); it != params.end()) q_add(q, key, it->second);
+  }
+  // allowed-ips 排在标准字段之后（非标准扩展，放前面会让链接看起来不像 v2rayN 的）
+  if (const auto it = params.find("allowedips"); it != params.end()) {
+    q_add(q, "allowedips", it->second);
+  }
+
+  const std::string host =
+      codec::is_ipv6(peer.server) ? ("[" + peer.server + "]") : peer.server;
+  std::string link = "wireguard://" +
+                     codec::percent_encode(wireguard_detail::pad_key_base64(wg.private_key)) + "@" +
+                     host + ":" + std::to_string(peer.port);
+  const std::string query = q_string(q);
+  if (!query.empty()) link += "?" + query;
+  if (!node.name.empty()) link += "#" + codec::percent_encode(node.name);
+  return link;
+}
+
+// ---------------------------------------------------------------------------
 // 不支持 / 支持
 // ---------------------------------------------------------------------------
 const char* unsupported_reason(Protocol protocol) {
@@ -463,7 +588,9 @@ const char* unsupported_reason(Protocol protocol) {
     case Protocol::Http:
       return "分享链接没有 http 形态，用 -t v2rayn 才能把 http 代理导给 v2rayN/v2rayNG";
     case Protocol::WireGuard:
-      return "WireGuard 需要完整的密钥/地址配置，无法用分享链接表达";
+      // WG 没有业界标准链接格式（v2rayNG 根本不支持），这里产出的是本工具自定义的
+      // wireguard://。缺关键字段时才会走到这里。
+      return "WireGuard 缺少私钥 / 对端公钥 / endpoint，无法生成链接";
     default:
       return "该协议没有 v2rayNG 分享链接格式";
   }
@@ -490,6 +617,8 @@ std::optional<std::string> build_share_link(const ProxyNode& node) {
       return build_hysteria2(node);
     case Protocol::Socks5:
       return build_socks(node);
+    case Protocol::WireGuard:
+      return build_wireguard(node);
     default:
       return std::nullopt;
   }

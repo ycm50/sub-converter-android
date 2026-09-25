@@ -9,6 +9,7 @@
 #include "subconv/codec.hpp"
 #include "subconv/convert.hpp"
 #include "subconv/json.hpp"
+#include "../parse/wireguard_common.hpp"
 
 namespace subconv {
 namespace {
@@ -255,6 +256,79 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
   return out;
 }
 
+/// sing-box 的 WireGuard 是 **endpoint**（1.11 起从 outbound 迁过来的新形态），
+/// 字段名见 option/wireguard.go 的 WireGuardEndpointOptions：
+///   type / tag / address[] / private_key / peers[]{address,port,public_key,
+///   pre_shared_key,allowed_ips,persistent_keepalive_interval,reserved} / mtu / udp_timeout
+/// 旧的 `LegacyWireGuardOutboundOptions`（server / server_port / local_address / peer_public_key）
+/// 仍被兼容，但既然要产出新配置就用新形态 —— 老形态在后续版本里会消失。
+/// 返回 Null 表示该节点无法转换（已记录原因）。
+Json build_wireguard_endpoint(const ProxyNode& n, std::vector<std::string>& warnings) {
+  auto reject = [&](const std::string& why) {
+    warnings.push_back("跳过节点 " + n.name + "（wireguard）：sing-box " + why);
+    return Json();
+  };
+
+  const WireGuardOptions& wg = n.wireguard;
+  if (wg.private_key.empty()) return reject("endpoint 必须有 private_key");
+  if (wg.peers.empty()) return reject("endpoint 必须有 peers");
+
+  Json endpoint = Json::object();
+  endpoint["type"] = "wireguard";
+  endpoint["tag"] = n.name;
+
+  // address 是本地网卡地址（CIDR）。裸 IP 要补全掩码：WireGuard 的 Address 允许
+  // 不带前缀，但 sing-box 解析的是 netip.Prefix，只认 "10.0.0.2/32" 这种写法。
+  Json address = Json::array();
+  auto push_address = [&address](const std::string& raw) {
+    std::string value = codec::trim(raw);
+    if (value.empty()) return;
+    if (value.find('/') == std::string::npos) {
+      value += codec::is_ipv6(value) ? "/128" : "/32";
+    }
+    address.push_back(value);
+  };
+  push_address(wg.ip);
+  push_address(wg.ipv6);
+  if (address.empty()) return reject("endpoint 必须有本地 address（ip / ipv6）");
+  endpoint["address"] = std::move(address);
+  endpoint["private_key"] = wireguard_detail::pad_key_base64(wg.private_key);
+
+  Json peers = Json::array();
+  for (const auto& peer : wg.peers) {
+    Json entry = Json::object();
+    if (!peer.server.empty()) entry["address"] = peer.server;
+    if (peer.port != 0) entry["port"] = peer.port;
+    if (peer.public_key.empty()) return reject("peer 缺少 public_key");
+    entry["public_key"] = wireguard_detail::pad_key_base64(peer.public_key);
+    if (!peer.pre_shared_key.empty()) {
+      entry["pre_shared_key"] = wireguard_detail::pad_key_base64(peer.pre_shared_key);
+    }
+    std::vector<std::string> allowed = peer.allowed_ips;
+    if (allowed.empty()) {
+      allowed.push_back("0.0.0.0/0");
+      if (!wg.ipv6.empty()) allowed.push_back("::/0");
+    }
+    entry["allowed_ips"] = allowed;
+    if (peer.reserved.size() == 3) entry["reserved"] = peer.reserved;
+    if (peer.keepalive > 0) {
+      entry["persistent_keepalive_interval"] = peer.keepalive;
+    }
+    peers.push_back(std::move(entry));
+  }
+  endpoint["peers"] = std::move(peers);
+
+  if (wg.mtu > 0) endpoint["mtu"] = wg.mtu;
+  // remote-dns-resolve / dns 是 mihomo 的概念，sing-box 由 route 的 DNS 规则决定，
+  // 这里只提醒一句，免得用户以为「过滤掉了」。
+  if (wg.remote_dns_resolve || !wg.dns.empty()) {
+    warnings.push_back("节点 " + n.name +
+                       "（wireguard）：sing-box 的 endpoint 没有 remote-dns-resolve / dns 字段，"
+                       "请改用 route 里的 DNS 规则");
+  }
+  return endpoint;
+}
+
 }  // namespace
 
 Result<std::string> emit_singbox(const NodeList& nodes, const EmitOptions& opts,
@@ -264,17 +338,25 @@ Result<std::string> emit_singbox(const NodeList& nodes, const EmitOptions& opts,
 
   std::vector<std::string> skipped;
   Json node_outbounds = Json::array();
+  Json node_endpoints = Json::array();
   Json node_tags = Json::array();
   for (const auto& node : prepared) {
-    Json out = build_outbound(node, skipped);
+    // wireguard 是 endpoint，其余是 outbound；两者都会进 selector / urltest 的候选。
+    Json out = node.protocol == Protocol::WireGuard
+                   ? build_wireguard_endpoint(node, skipped)
+                   : build_outbound(node, skipped);
     if (out.is_null()) continue;
     node_tags.push_back(node.name);
-    node_outbounds.push_back(std::move(out));
+    if (node.protocol == Protocol::WireGuard) {
+      node_endpoints.push_back(std::move(out));
+    } else {
+      node_outbounds.push_back(std::move(out));
+    }
   }
   if (warnings != nullptr) {
     for (const auto& w : skipped) warnings->push_back(w);
   }
-  if (node_outbounds.empty()) {
+  if (node_tags.empty()) {
     const std::string detail =
         skipped.empty() ? std::string() : ("\n  - " + codec::join(skipped, "\n  - "));
     return fail("没有任何节点能转换为 sing-box 配置" + detail);
@@ -311,6 +393,8 @@ Result<std::string> emit_singbox(const NodeList& nodes, const EmitOptions& opts,
                                          {"tag", "mixed-in"},
                                          {"listen", "127.0.0.1"},
                                          {"listen_port", 2080}}});
+  // endpoints 必须排在 outbounds 之前（sing-box 要求先声明 endpoint 再引用）。
+  if (!node_endpoints.empty()) config["endpoints"] = std::move(node_endpoints);
   config["outbounds"] = std::move(outbounds);
   config["route"] = Json{{"final", g_select}, {"auto_detect_interface", true}};
 

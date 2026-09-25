@@ -75,6 +75,7 @@ bool protocol_is_dialer(Protocol p) noexcept {
     case Protocol::Hysteria2:
     case Protocol::Tuic:
     case Protocol::Snell:
+    case Protocol::WireGuard:
       return true;
     default:
       return false;

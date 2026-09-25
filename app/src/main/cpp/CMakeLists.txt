@@ -134,8 +134,11 @@ add_library(subconv_core STATIC
   src/parse/hysteria.cpp
   src/parse/tuic.cpp
   src/parse/snell.cpp
+  src/parse/wireguard.cpp
+  src/parse/wireguard_common.cpp
   src/parse/uri_common.cpp
   src/parse/clash_yaml.cpp
+  src/parse/xray_json.cpp
   src/parse/parse.cpp
   src/fetch/http.cpp
   src/fetch/android_http.cpp

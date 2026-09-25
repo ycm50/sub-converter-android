@@ -183,11 +183,11 @@
 <main>
   <section class="panel">
     <h2>输入</h2>
-    <textarea id="input" spellcheck="false" placeholder="每行一个订阅链接，例如：&#10;https://example.com/api/v1/client/subscribe?token=xxx&#10;&#10;也可以直接粘贴分享链接（ss:// vmess:// vless:// trojan:// …）、Base64 订阅、Clash YAML 或 JSON 版 Clash 配置"></textarea>
+    <textarea id="input" spellcheck="false" placeholder="每行一个订阅链接，例如：&#10;https://example.com/api/v1/client/subscribe?token=xxx&#10;&#10;也可以直接粘贴分享链接（ss:// vmess:// vless:// trojan:// wireguard:// …）、Base64 订阅、Clash YAML、JSON 版 Clash 配置、Xray JSON 配置（面板 ?app=xray 返回的那种，单份配置或配置数组都行），或标准 WireGuard .conf 配置"></textarea>
     <p class="hint">
       <b>独占一行</b>且<b>顶格</b>的 <b>http(s)://</b> 行按订阅链接抓取（走服务端代理设置）；
       其余行<b>原样保留缩进</b>合并成一段<b>订阅内容</b>直接解析 ——
-      分享链接列表、Base64 包裹、Clash YAML（含 JSON 版）都自动识别。
+      分享链接列表、Base64 包裹、Clash YAML（含 JSON 版）、Xray JSON 配置都自动识别。
     </p>
     <div class="row">
       <button id="example" type="button">填入示例</button>

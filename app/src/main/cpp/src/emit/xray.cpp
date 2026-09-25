@@ -10,6 +10,7 @@
 #include "subconv/codec.hpp"
 #include "subconv/convert.hpp"
 #include "subconv/json.hpp"
+#include "../parse/wireguard_common.hpp"
 
 namespace subconv {
 namespace {
@@ -232,6 +233,69 @@ Json build_outbound(const ProxyNode& n, std::vector<std::string>& warnings) {
       }
       out["settings"] = Json{{"servers", Json::array({std::move(server)})}};
       if (n.tls.enabled) out["streamSettings"] = build_stream_settings(n);
+      break;
+    }
+    case Protocol::WireGuard: {
+      // Xray 的 wireguard 出站是 **complete 形态**：`settings` 里直接写 secretKey / address /
+      // peers，字段名见 infra/conf/wireguard.go 的 WireGuardConfig / WireGuardPeerConfig。
+      // 几处容易写错的点：
+      //   * settings 里没有 server/port —— endpoint 是每个 peer 自己的字段（"host:port"）；
+      //   * `address` 是**字符串数组**（IPv4 + IPv6）；
+      //   * `reserved` 在 Xray 里是 []byte，JSON 里写 3 个十进制数最稳（base64 字符串它不认）；
+      //   * 密钥 base64 / hex 都收，Xray 的 ParseWireGuardKey 两种都解析。
+      const WireGuardOptions& wg = n.wireguard;
+      if (wg.private_key.empty()) return reject("wireguard 缺少 private-key");
+      if (wg.peers.empty()) return reject("wireguard 缺少 peers");
+
+      Json settings = Json::object();
+      settings["secretKey"] = wireguard_detail::pad_key_base64(wg.private_key);
+      Json address = Json::array();
+      if (!wg.ip.empty()) address.push_back(wg.ip);
+      if (!wg.ipv6.empty()) address.push_back(wg.ipv6);
+      if (address.empty()) {
+        return reject("wireguard 缺少本地 address（ip / ipv6）");
+      }
+      settings["address"] = std::move(address);
+
+      Json peers = Json::array();
+      for (const auto& peer : wg.peers) {
+        if (peer.public_key.empty()) return reject("wireguard 的 peer 缺少 public-key");
+        Json entry = Json::object();
+        entry["publicKey"] = wireguard_detail::pad_key_base64(peer.public_key);
+        if (!peer.pre_shared_key.empty()) {
+          entry["preSharedKey"] = wireguard_detail::pad_key_base64(peer.pre_shared_key);
+        }
+        if (!peer.server.empty() && peer.port != 0) {
+          entry["endpoint"] = peer.server + ":" + std::to_string(peer.port);
+        }
+        if (peer.keepalive > 0) entry["keepAlive"] = peer.keepalive;
+        std::vector<std::string> allowed = peer.allowed_ips;
+        if (allowed.empty()) {
+          // Xray 自己的默认值就是这两个（见 WireGuardPeerConfig.Build）
+          allowed = {"0.0.0.0/0", "::/0"};
+        }
+        entry["allowedIPs"] = allowed;
+        peers.push_back(std::move(entry));
+      }
+      settings["peers"] = std::move(peers);
+      // reserved 是 WARP 专有字段：Xray 的 schema 里有（`reserved` []byte，只接受 3 字节），
+      // 但实现侧没有用到它（v26.6.1 的 deviceConfig 没有把 reserved 传给底层），
+      // 写进去只是"为将来留个记号"，所以放在最后 —— 解析器会忽略未知/未使用字段。
+      for (const auto& peer : wg.peers) {
+        if (peer.reserved.size() == 3) {
+          settings["reserved"] = peer.reserved;
+          break;
+        }
+      }
+      if (wg.mtu > 0) settings["mtu"] = wg.mtu;
+      if (!wg.dns.empty()) settings["remoteDNS"] = wg.dns;
+
+      out["protocol"] = "wireguard";
+      out["settings"] = std::move(settings);
+      // wireguard 出站没有 streamSettings 概念，安全层显式写 none；mux 对它也无意义，
+      // 但 Xray 的默认 mux 配置会拖慢建连，统一按其它节点写成关闭。
+      out["streamSettings"] = Json{{"security", "none"}};
+      out["mux"] = Json{{"enabled", false}, {"concurrency", 8}};
       break;
     }
     default:

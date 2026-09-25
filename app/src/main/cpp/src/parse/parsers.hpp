@@ -17,5 +17,7 @@ Result<ProxyNode> parse_hysteria(std::string_view uri, const std::string& fallba
 Result<ProxyNode> parse_hysteria2(std::string_view uri, const std::string& fallback_name);
 Result<ProxyNode> parse_tuic(std::string_view uri, const std::string& fallback_name);
 Result<ProxyNode> parse_snell(std::string_view uri, const std::string& fallback_name);
+// WireGuard 的三个入口在公开头 include/subconv/wireguard.hpp 里声明（Clash YAML /
+// Xray JSON 解析器也要调用其中的辅助逻辑）。
 
 }  // namespace subconv

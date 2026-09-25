@@ -209,7 +209,12 @@ appcompat / material 都不需要）都已在 `~/.gradle/caches` 里，NDK 与 C
   就在 `:syncUpstream` 上红了 —— `-Psubconv.strict=true` 报「同步结果不自洽 ——
   CMakeLists.txt 的源文件列表和上游对不上：src/core/vless_encryption.cpp」，**一个字都没编到**。
   补法就是上面那两条「真跟进」命令（补 CMakeLists 那一行 + `-Psubconv.updatePin=true`），
-  补完即恢复：现在仓库锚点已经是 `67fba3a`（= 修复时的上游 HEAD）。
+  补完即恢复：当时锚点前移到了 `67fba3a`（= 修复时的上游 HEAD）。
+  **2026-09-25 又响了一次**：上游 `e3886f4`（加入对 wireguard 的适配）新增了
+  `src/parse/wireguard.cpp`、`src/parse/wireguard_common.cpp`、`src/parse/xray_json.cpp`，
+  同一个探针在 `:syncUpstream` 上报的还是同一句话，CI（run
+  [`36124059801`](https://github.com/ycm50/sub-converter-android/actions/runs/36124059801)）
+  同样**一个字都没编到**。补法一样，锚点因此前移到 `e3886f4`。
 * **`-Psubconv.strict=true` 只开在 CI**：CMakeLists 的源文件列表和上游对不上时直接失败。
   默认关（平时只是警告）—— 但 CI 每次拿的都是上游最新，等链接期报 undefined reference
   再排查，比在这里红一条贵得多。

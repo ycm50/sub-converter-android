@@ -3,6 +3,6 @@
 # syncUpstream 任务默认同步到这个 commit。改这一行 = 声明移植基线前移，
 # 改完请跑一次 ./gradlew syncUpstream 并把结果一起提交。
 #
-# 上一次同步：2026-09-15  67fba3a feat: 解析并透传 VLESS Encryption（encryption=mlkem768x25519plus.…）
+# 上一次同步：2026-09-25  e3886f4 加入对wireguard的适配
 #
-67fba3ac4b28038fe02a71cf81a8ea6f59d14387
+e3886f4bd88fc13d122be3a825b065550c4a8a18

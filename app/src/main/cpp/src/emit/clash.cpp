@@ -9,6 +9,7 @@
 #include "subconv/codec.hpp"
 #include "subconv/convert.hpp"
 #include "subconv/yaml.hpp"
+#include "../parse/wireguard_common.hpp"
 
 namespace subconv {
 namespace {
@@ -229,8 +230,12 @@ Yaml build_proxy(const ProxyNode& n, const EmitOptions& opts,
   Yaml y = Yaml::mapping();
   y.set("name", Yaml::scalar(n.name));
   y.set("type", Yaml::scalar(clash_type(n.protocol)));
-  y.set("server", Yaml::scalar(n.server));
-  y.set("port", Yaml::integer(n.port));
+  // wireguard 没有顶层的 server/port —— endpoint 属于每个 peer，mihomo 的简化语法虽然也认
+  // 顶层这两个字段，但同时写 peers: 时它们会被忽略；只写 peers: 更贴近官方文档的完整语法。
+  if (n.protocol != Protocol::WireGuard) {
+    y.set("server", Yaml::scalar(n.server));
+    y.set("port", Yaml::integer(n.port));
+  }
 
   switch (n.protocol) {
     // ---------------------------------------------------------------- ss
@@ -377,6 +382,76 @@ Yaml build_proxy(const ProxyNode& n, const EmitOptions& opts,
         y.set("obfs-opts", std::move(obfs));
       }
       break;
+    }
+
+    // ---------------------------------------------------------- wireguard
+    case Protocol::WireGuard: {
+      if (legacy) return reject("原版 Clash 不支持 wireguard");
+      const WireGuardOptions& wg = n.wireguard;
+      if (wg.private_key.empty()) return reject("wireguard 缺少 private-key");
+      if (wg.peers.empty()) return reject("wireguard 缺少 peers");
+
+      // 密钥必须补回 '='：mihomo 用 Go 的 base64.StdEncoding 解码，
+      // 缺 padding 会直接 `illegal base64 data at input byte 40` 拒绝加载整份配置。
+      y.set("private-key", Yaml::scalar(wireguard_detail::pad_key_base64(wg.private_key)));
+      if (!wg.ip.empty()) y.set("ip", Yaml::scalar(wg.ip));
+      if (!wg.ipv6.empty()) y.set("ipv6", Yaml::scalar(wg.ipv6));
+
+      // mihomo 的「完整语法」是 peers: 数组（多对端），简写语法只允许一个对端。
+      // 统一按 peers: 输出，单对端也是合法的 mihomo 配置。
+      Yaml peers = Yaml::sequence();
+      for (const auto& peer : wg.peers) {
+        Yaml entry = Yaml::mapping();
+        if (!peer.server.empty()) entry.set("server", Yaml::scalar(peer.server));
+        if (peer.port != 0) entry.set("port", Yaml::integer(peer.port));
+        if (!peer.public_key.empty()) {
+          entry.set("public-key", Yaml::scalar(wireguard_detail::pad_key_base64(peer.public_key)));
+        }
+        if (!peer.pre_shared_key.empty()) {
+          entry.set("pre-shared-key",
+                    Yaml::scalar(wireguard_detail::pad_key_base64(peer.pre_shared_key)));
+        }
+        // allowed-ips 缺省时按客户端全量分流补齐：mihomo 对空值的处理依赖远端，
+        // 显式写出来才能保证「所有流量都进隧道」。IPv6 只在本地有 v6 地址时才加，
+        // 否则 mihomo 会因为 `::/0` 而尝试走一个不存在的 v6 网卡。
+        std::vector<std::string> allowed = peer.allowed_ips;
+        if (allowed.empty()) {
+          allowed.push_back("0.0.0.0/0");
+          if (!wg.ipv6.empty()) allowed.push_back("::/0");
+        }
+        Yaml allowed_yaml = Yaml::sequence();
+        for (const auto& item : allowed) allowed_yaml.push(Yaml::scalar(item));
+        entry.set("allowed-ips", std::move(allowed_yaml));
+        if (peer.reserved.size() == 3) {
+          Yaml reserved = Yaml::sequence();
+          for (const int byte : peer.reserved) reserved.push(Yaml::integer(byte));
+          entry.set("reserved", std::move(reserved));
+        }
+        if (peer.keepalive > 0) entry.set("persistent-keepalive", Yaml::integer(peer.keepalive));
+        peers.push(std::move(entry));
+      }
+      y.set("peers", std::move(peers));
+
+      if (!wg.dns.empty()) {
+        Yaml dns = Yaml::sequence();
+        for (const auto& server : wg.dns) dns.push(Yaml::scalar(server));
+        y.set("dns", std::move(dns));
+      }
+      if (wg.remote_dns_resolve) y.set("remote-dns-resolve", Yaml::boolean(true));
+      if (wg.mtu > 0) y.set("mtu", Yaml::integer(wg.mtu));
+      if (!wg.ip_stack_mode.empty() || !wg.congestion_controller.empty()) {
+        Yaml stack = Yaml::mapping();
+        if (!wg.ip_stack_mode.empty()) stack.set("mode", Yaml::scalar(wg.ip_stack_mode));
+        if (!wg.congestion_controller.empty()) {
+          stack.set("congestion-controller", Yaml::scalar(wg.congestion_controller));
+        }
+        y.set("ip-stack", std::move(stack));
+      }
+      if (opts.udp && n.udp) y.set("udp", Yaml::boolean(true));
+      if (n.tfo) {
+        warnings.push_back("节点 " + n.name + "（wireguard）：mihomo 的 wireguard 出站没有 tfo 选项，已忽略");
+      }
+      return y;
     }
 
     // ------------------------------------------------------------- socks5

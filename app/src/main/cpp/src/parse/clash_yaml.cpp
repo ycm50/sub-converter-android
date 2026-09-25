@@ -1,7 +1,8 @@
 // Clash / mihomo YAML 作为输入源 → ProxyNode
 //
 // 覆盖常见机场直接下发的 Clash 配置（ss / ssr / vmess / vless / trojan / hysteria /
-// hysteria2 / tuic / snell / socks5 / http）。
+// hysteria2 / tuic / snell / wireguard / socks5 / http）。
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -9,6 +10,8 @@
 #include "subconv/codec.hpp"
 #include "subconv/convert.hpp"
 #include "subconv/vless_encryption.hpp"
+#include "subconv/wireguard.hpp"
+#include "wireguard_common.hpp"
 
 #ifdef SUBCONV_HAVE_YAML
 #include <yaml-cpp/yaml.h>
@@ -247,10 +250,14 @@ Result<ProxyNode> proxy_from_yaml(const YamlNode& p) {
   node.name = ystr(p, "name");
   node.server = ystr(p, "server");
   const int port = yint(p, "port", 0);
-  if (node.server.empty() || port <= 0 || port > 65535) {
-    return fail("proxy 缺少合法的 server/port");
+  // WireGuard 的 server/port 属于 peer（见下面的 case），顶层可以完全没有这两个字段，
+  // 所以校验推迟到 switch 之后。
+  if (*protocol != Protocol::WireGuard) {
+    if (node.server.empty() || port <= 0 || port > 65535) {
+      return fail("proxy 缺少合法的 server/port");
+    }
+    node.port = static_cast<uint16_t>(port);
   }
-  node.port = static_cast<uint16_t>(port);
   if (ybool(p, "udp", true) == false) node.udp = false;
   if (ybool(p, "tfo")) node.tfo = true;
 
@@ -356,8 +363,110 @@ Result<ProxyNode> proxy_from_yaml(const YamlNode& p) {
       apply_tls_from_yaml(node, p);
       break;
     }
+    case Protocol::WireGuard: {
+      // mihomo 的 wireguard 有两种写法：
+      //   * 简写（单 peer）：server / port / public-key / pre-shared-key / reserved / allowed-ips 都在顶层
+      //   * 完整（多 peer）：顶层只有 private-key / ip / ipv6，对端在 `peers:`
+      // 两种都收，统一落到 node.wireguard。
+      WireGuardOptions& wg = node.wireguard;
+      wg.present = true;
+      wg.private_key = wireguard_detail::strip_key_padding(
+          ystr_any(p, {"private-key", "private_key", "privatekey"}));
+      for (const auto& address : ylist(p["ip"])) {
+        for (const auto& piece : wireguard_detail::split_list(address)) {
+          if (piece.empty()) continue;
+          if (wireguard_detail::address_is_ipv6(piece)) {
+            if (wg.ipv6.empty()) wg.ipv6 = piece;
+          } else if (wg.ip.empty()) {
+            wg.ip = piece;
+          }
+        }
+      }
+      if (const std::string v6 = ystr_any(p, {"ipv6", "ip-6"}); !v6.empty()) wg.ipv6 = v6;
+      if (const std::string dns = ystr_any(p, {"dns", "remote-dns"}); !dns.empty()) {
+        wg.dns = wireguard_detail::split_allowed_ips(dns);
+      }
+      for (const auto& server : ylist(p["dns"])) {
+        // `dns` 既可能是 "1.1.1.1" 也可能是 ["1.1.1.1", "8.8.8.8"]；ylist 对两种都返回，
+        // 标量分支已经填过时就不再覆盖。
+        if (wg.dns.size() <= 1 && !server.empty() &&
+            std::find(wg.dns.begin(), wg.dns.end(), server) == wg.dns.end()) {
+          wg.dns.push_back(server);
+        }
+      }
+      wg.remote_dns_resolve = ybool(p, "remote-dns-resolve");
+      wg.mtu = yint(p, "mtu", 0);
+      if (const YamlNode stack = p["ip-stack"]; stack && stack.IsMap()) {
+        wg.ip_stack_mode = codec::to_lower(ystr(stack, "mode"));
+        wg.congestion_controller = ystr_any(stack, {"congestion-controller", "congestion_controller"});
+        if (wg.ip_stack_mode.empty()) wg.ip_stack_mode = codec::to_lower(ystr(stack, "ip-stack"));
+      }
+
+      auto peer_from_map = [](const YamlNode& peer_node) {
+        WireGuardPeer peer;
+        peer.server = ystr(peer_node, "server");
+        peer.port = static_cast<uint16_t>(yint(peer_node, "port", 0));
+        peer.public_key = wireguard_detail::strip_key_padding(
+            ystr_any(peer_node, {"public-key", "public_key", "publickey"}));
+        peer.pre_shared_key = wireguard_detail::strip_key_padding(
+            ystr_any(peer_node, {"pre-shared-key", "pre_shared_key", "presharedkey"}));
+        peer.allowed_ips = ylist(peer_node["allowed-ips"]);
+        if (peer.allowed_ips.empty()) peer.allowed_ips = ylist(peer_node["allowed_ips"]);
+        peer.keepalive = yint(peer_node, "persistent-keepalive", 0);
+        if (peer.keepalive == 0) peer.keepalive = yint(peer_node, "persistent_keepalive", 0);
+        const YamlNode reserved = peer_node["reserved"];
+        if (reserved) {
+          if (reserved.IsSequence()) {
+            for (const auto& item : reserved) {
+              std::string piece;
+              try {
+                piece = item.as<std::string>();
+              } catch (...) {
+                continue;
+              }
+              std::vector<int> bytes;
+              wireguard_detail::parse_reserved_scalar(piece, bytes);
+              if (bytes.size() == 3) {
+                peer.reserved = std::move(bytes);
+                break;
+              }
+            }
+          } else if (reserved.IsScalar()) {
+            wireguard_detail::parse_reserved_scalar(ystr(peer_node, "reserved"), peer.reserved);
+          }
+        }
+        return peer;
+      };
+
+      const YamlNode peers = p["peers"];
+      if (peers && peers.IsSequence()) {
+        for (const auto& entry : peers) {
+          if (!entry.IsMap()) continue;
+          wg.peers.push_back(peer_from_map(entry));
+        }
+      }
+      if (wg.peers.empty() && (!node.server.empty() || port > 0)) {
+        wg.peers.push_back(peer_from_map(p));
+      }
+      break;
+    }
     default:
       return fail("暂不支持从 Clash YAML 读取该类型");
+  }
+
+  if (*protocol == Protocol::WireGuard) {
+    // 复用与 wireguard:// 完全一样的校验，保证两条输入路径的报错一致。
+    if (node.wireguard.private_key.empty()) {
+      return fail("wireguard 缺少 private-key");
+    }
+    if (node.wireguard.peers.empty()) {
+      return fail("wireguard 缺少对端（peers 或顶层 server/public-key）");
+    }
+    node.server = node.wireguard.peers.front().server;
+    node.port = node.wireguard.peers.front().port;
+    if (node.server.empty() || node.port == 0) {
+      return fail("wireguard 对端缺少 server/port");
+    }
   }
 
   return node;

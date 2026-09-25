@@ -129,6 +129,46 @@ struct SsPlugin {
 };
 
 // ---------------------------------------------------------------------------
+// WireGuard
+// ---------------------------------------------------------------------------
+//
+// WireGuard 与其它协议在数据模型上有个根本差别：它不是「连到某台服务器:端口」的
+// 代理，而是一块**三层（L3）虚拟网卡 + 一组对端（peer）**。所以：
+//   * 服务端地址/端口属于 **peer**，不属于节点本身（`server` / `port` 仍会被填成
+//     第一个 peer 的 endpoint，纯粹是为了让 `prepare_nodes` 的去重、命名与告警
+//     能复用既有逻辑，以及让不支持多 peer 的目标有一个明确取值）；
+//   * 真正决定网卡的是客户端侧的 `private_key` + `interface_address`；
+//   * 缺少 private-key 或 peer 的 public-key 时，配置一定连不上 —— 这两处必须校验。
+//
+// `reserved` 是 Cloudflare WARP 专有的 3 字节「保留位」（WARP 用它传递 client id
+// 的一部分），标准 WireGuard 没有这个概念。三种常见形态都收：
+//   * JSON / YAML 数组：[209, 98, 59]
+//   * 4 字符 base64："U4An"
+//   * 3 字节的十六进制（Xray 的 `reserved` 是 []byte，JSON 里也常写成 hex）
+struct WireGuardPeer {
+  std::string server;                ///< Endpoint 主机
+  uint16_t port = 0;                 ///< Endpoint 端口
+  std::string public_key;            ///< 对端公钥（base64 或 hex）
+  std::string pre_shared_key;        ///< PresharedKey（可选）
+  std::vector<std::string> allowed_ips;   ///< 空表示按内核默认（0.0.0.0/0 + ::/0）
+  std::vector<int> reserved;         ///< 0 / 3 个元素
+  int keepalive = 0;                 ///< PersistentKeepalive（秒）
+};
+
+struct WireGuardOptions {
+  bool present = false;              ///< 是否是一个 WireGuard 节点
+  std::string private_key;           ///< 客户端私钥（base64 或 hex）
+  std::string ip;                    ///< 客户端 IPv4（mihomo `ip`；可含 /掩码）
+  std::string ipv6;                  ///< 客户端 IPv6（mihomo `ipv6`）
+  std::vector<std::string> dns;      ///< 远程 DNS（mihomo `dns`，需 remote-dns-resolve）
+  bool remote_dns_resolve = false;
+  int mtu = 0;                       ///< 0 = 用内核默认
+  std::string ip_stack_mode;         ///< auto / gvisor / system
+  std::string congestion_controller; ///< cubic / reno / bbr（仅 mihomo）
+  std::vector<WireGuardPeer> peers;
+};
+
+// ---------------------------------------------------------------------------
 // 节点
 // ---------------------------------------------------------------------------
 struct ProxyNode {
@@ -169,6 +209,7 @@ struct ProxyNode {
   GrpcOptions grpc;
   H2Options h2;
   XhttpOptions xhttp;
+  WireGuardOptions wireguard;
   SsPlugin plugin;
 
   bool udp = true;
