@@ -3,6 +3,6 @@
 # syncUpstream 任务默认同步到这个 commit。改这一行 = 声明移植基线前移，
 # 改完请跑一次 ./gradlew syncUpstream 并把结果一起提交。
 #
-# 上一次同步：2026-09-26  e3886f4 加入对wireguard的适配
+# 上一次同步：2026-09-28  8e857b2 支持生成链式代理 增加前置后置代理
 #
-e3886f4bd88fc13d122be3a825b065550c4a8a18
+8e857b29047e44b9acec9f9eeddd95cce341f8ec

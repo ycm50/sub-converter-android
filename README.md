@@ -71,10 +71,15 @@ ServerHost ──► NativeServer.nativeStart("127.0.0.1", 0)      ← port = 0�
 
 细节见「[跟进上游](#跟进上游)」。
 
+> 本机出网默认走 **10808 代理**（配在用户级 `~/.gradle/gradle.properties` 的 `systemProp.*`）。
+> 代理没起会看到 `Connection refused` / `Failed to download any source lists!` —— 本机构建
+> 不联网也能跑，但真要联网时先确认代理在跑；想临时换/关代理见
+> 「[本机环境](#本机环境已经配好了以及为什么)」第 4 条。
+
 ### 本机环境（已经配好了，以及为什么）
 
 下面是让构建在这台机器上真的跑起来所需的全部信息 —— **依据是一次成功构建留下的现场**：
-`app/build/outputs/apk/debug/app-debug.apk`（9.3 MiB，`lib/{arm64-v8a,armeabi-v7a,x86_64}/
+`app/build/outputs/apk/debug/app-debug.apk`（10.0 MiB，`lib/{arm64-v8a,armeabi-v7a,x86_64}/
 libsubconv.so` 三个 ABI 都在），以及 `.cxx/Debug/*/CMakeCache.txt` 里记下的实际用的
 NDK / CMake 路径。
 
@@ -151,7 +156,7 @@ C:\...\Local\Android\Sdk\cmake  --junction-->  A:\AndroidSDK\cmake
 正好严格相等，直接命中。查找顺序是：`cmake.dir` → `$SDK/cmake/*` → `$PATH` →
 `$SDK/cmake/*`（非标准回退）→ 联网下载；本机在第二步就命中了。
 
-**4. 日志里那堆 `Connection refused` / `Failed to download any source lists!` 是代理没起。**
+**4. 出网走本机 10808 代理 —— 配置在用户级 `~/.gradle/gradle.properties` 里。**
 
 `~/.gradle/gradle.properties`（用户级，不是本工程的）里有：
 
@@ -162,12 +167,27 @@ systemProp.https.proxyHost=127.0.0.1
 systemProp.https.proxyPort=10808
 ```
 
-而 10808 端口上当前没有任何进程在监听（Studio 的 HTTP Proxy 设置也指的是它），
-于是 Gradle 的每一个出网请求都被拒。这些 SDK 清单下载失败**只是警告，不影响本机构建**：
-需要的依赖（espresso / junit / aapt2 `9.2.1-15009934`；主代码只用 framework，连
-appcompat / material 都不需要）都已在 `~/.gradle/caches` 里，NDK 与 CMake 都在本地
-—— 整条链路不需要联网。
-真要联网时把 10808 的代理起起来，或临时删掉那四行 `systemProp.*`。
+**这就是 Gradle 真正生效的那份配置**（`systemProp.*` 会被应用到守护进程）。所以本机
+`./gradlew` 的每一次出网都会走 10808：代理起着就走代理，代理没起就会看到一堆
+`Connection refused` / `Failed to download any source lists!`（**那是警告，不影响本机构建** ——
+需要的依赖 espresso / junit / aapt2 `9.2.1-15009934` 都已在 `~/.gradle/caches` 里，
+主代码只用 framework，连 appcompat / material 都不需要；NDK 与 CMake 都在本地）。
+
+**2026-09-28 实测（代理已起）**：10808 由 v2rayN 的 xray 提供，HTTP(CONNECT) 与 SOCKS5 都通；
+`./gradlew clean :app:assembleDebug --refresh-dependencies` 走它**成功**
+（**BUILD SUCCESSFUL in 5m 46s**，45 个任务全部执行）。`--refresh-dependencies` 会强制重新解析
+依赖，所以这一次出网是真的经过了 10808 —— 判断依据见下面的「命令行 `-D` 优先」那条：
+同一个命令把端口换成没人监听的 10809，**4 秒就挂**。
+
+⚠️ **两个坑**（都实测过）：
+* **`GRADLE_OPTS` 里写 `-Dhttp.proxyHost=` 不管用** —— 它只设到启动器 JVM 上，真正干活的守护
+  进程看不到。实测：`GRADLE_OPTS` 指向一个**没人监听的**端口，构建照样成功（因为生效的仍是
+  上面那份 10808）。
+* **命令行 `-D` 优先于 `gradle.properties`**：把 `-Dhttps.proxyPort=10809`（死端口）放在
+  `./gradlew` 后面，构建 4 秒就挂（插件解析失败）。想在**单次**构建里换代理/关代理，就用这种写法：
+  `./gradlew ... "-Dhttp.proxyPort=10808" "-Dhttps.proxyPort=10808"`。
+* 要**彻底**不用代理（比如代理挂了、又非联网不可），把那四行 `systemProp.*` 临时注释掉，
+  或用上面的命令行 `-D` 指到一个可用端口。
 
 **5. JDK 21 是 Studio 自带的，不需要下载。** `gradle/gradle-daemon-jvm.properties` 要求
 `toolchainVersion=21`，而 Gradle 守护进程实际用的是 Android Studio 自带的
@@ -215,6 +235,26 @@ appcompat / material 都不需要）都已在 `~/.gradle/caches` 里，NDK 与 C
   同一个探针在 `:syncUpstream` 上报的还是同一句话，CI（run
   [`36124059801`](https://github.com/ycm50/sub-converter-android/actions/runs/36124059801)）
   同样**一个字都没编到**。补法一样，锚点因此前移到 `e3886f4`。
+  **2026-09-28 第三次**：上游 `15ee993`（支持生成链式代理）新增了 `src/emit/chain.cpp`
+  （外加 `data/web/index.html` 的链路输入框、xray/clash/sing-box 三个输出器的改动）。
+  这次是在**本地**跑 `./gradlew syncUpstream` 时看到的同一句警告
+  （「上游新增的源文件没进 CMakeLists，会把链接搞崩：src/emit/chain.cpp」），补法是往
+  `app/src/main/cpp/CMakeLists.txt` 的源文件列表里加一行（位置照上游 CMakeLists.txt：
+  在 `dns.cpp` 与 `emit.cpp` 之间），再 `-Psubconv.updatePin=true` 前移锚点到 `15ee993`；
+  `tools\build-native.ps1` 三个 ABI 全过（`src/emit/chain.cpp.o` 有编到），
+  自检回到「差异恰好等于补丁集，同步干净」。这次 CI 还没跑过。
+  **2026-09-28 第四次**：上游 `8e857b2`（`支持生成链式代理 增加前置后置代理` —— 在 `15ee993`
+  基础上补齐**后置代理** `--chain-rear` / `?chain_rear=`）。这次相对 `15ee993`**没有新增或删除
+  源文件**，`CMakeLists.txt` 也是零差异，所以不用动源文件列表：`./gradlew syncUpstream`
+  走的是「覆盖 14 / 新增 0 / 删除 0」，4 个补丁全 `OK`，自检「差异恰好等于补丁集，同步干净」，
+  CMakeLists 检查「一致：36 个上游 .cpp 都在列表里」。独立复核：清单内 50 个文件与上游
+  逐字节一致、恰好 5 个不同（正是 4 个补丁覆盖的那 5 个）。锚点因此前移到 `8e857b2`。
+  **紧接着做了结构性的一步**（不涉及上游提交）：把上游的 `CMakeLists.txt` 也纳入同步
+  （落地时改名成 `upstream.cmake`），Android 入口改成 `include()` 它 —— 于是源文件列表、
+  编译选项、C++ 标准探测、依赖发现、Web UI 内嵌**只有上游一份**。前面那三次「上游加文件 →
+  手工补一行」从此不会再发生；补丁因此多了 `0005-cmake-embed.patch`（只给上游那份加一个
+  `SUBCONV_BUILD_CLI` 开关，默认 ON，上游与桌面的行为一字不变）。改完拿上游一个临时提交
+  实测过：上游新增一个源文件，只有 `tools/upstream-ref.txt` 需要动，Android 入口一个字节没变。
 * **`-Psubconv.strict=true` 只开在 CI**：CMakeLists 的源文件列表和上游对不上时直接失败。
   默认关（平时只是警告）—— 但 CI 每次拿的都是上游最新，等链接期报 undefined reference
   再排查，比在这里红一条贵得多。
@@ -368,6 +408,7 @@ ninja 一看到它就会把几十个 TU 全量重编一遍。
 | 分享链接 / Base64 订阅解析 | ✅ | 纯 C++ |
 | Clash YAML 订阅解析 | ✅ | 内置 yaml-cpp（`-DSUBCONV_USE_YAML=OFF` 可关掉换取更快编译） |
 | `--probe-cert` 证书指纹 | ✅ | 走 Java `SSLSocket` + SHA-256 |
+| 链式代理（前置 / 后置） | ✅ | `src/emit/chain.cpp` 是纯 C++，Web UI 的「前置代理 / 后置代理」输入框与 `?chain=` / `?chain_rear=` / `options.chain` / `options.chain_rear` 都能用；上游那两个 `--chain` / `--chain-rear` 命令行开关在 Android 上没有入口（等价能力走上面几项）。后置的流量落点是链路末端，出站名写成 `节点 → 后置` |
 | `-k` / insecure | ✅ | 抓订阅有效；证书探测本来就跳过校验 |
 | CLI 子命令 | ❌ | Android 上没有命令行入口 |
 
@@ -419,7 +460,9 @@ ninja 一看到它就会把几十个 TU 全量重编一遍。
 | 路径 | 进库 | 为什么 |
 |---|---|---|
 | `local.properties` | ❌ | 里面是 `sdk.dir` 这类绝对路径，而且 Studio 每次 Sync 都会按自己的设置重写它（见「本机环境」）。让每个人自己生成 |
-| `build/`、`app/build/`、`app/.cxx/`、`.gradle/` | ❌ | 全是可再生的构建产物；本机 `app/.cxx` 一个人就有 400+ MB |
+| `build/`、`app/build/`、`app/.cxx/`、`.gradle/`、`build/native-so/` | ❌ | 全是可再生的构建产物；本机 `app/.cxx` 一个人就有 400+ MB |
+| `app/src/main/jniLibs/` | ❌ | `tools/build-native.ps1 -Install` 拷进去的那份 `.so` 是**产物**：本工程进包的那份由 AGP 现场编（externalNativeBuild）。只有改成 jniLibs 打包模式时才需要它，那时 `git add -f` 单独放行 |
+| `*.rej`、`*.orig` | ❌ | `syncUpstream -Psubconv.reject=true` 套不上的补丁落成的现场文件，落在**被跟踪**的 `app/src/main/cpp/` 里；处理完就该消失，别混进提交 |
 | `.idea/`、`*.iml` | ❌ | 这个工程的构建配置全在 Gradle 里，本机 `.idea` 下只有一个 `workspace.xml`，没有值得共享的东西 |
 | `*.jks`、`*.keystore`、`keystore.properties` | ❌ | 签名私钥 |
 | `gradle/wrapper/gradle-wrapper.jar` | ✅ | **别忽略**：没有它 `gradlew` 就跑不起来 |
@@ -450,10 +493,15 @@ ninja 一看到它就会把几十个 TU 全量重编一遍。
   `CMake ... was not found in SDK, PATH, or by cmake.dir property`），跟代码无关。
   本机是靠 C 盘那份 SDK 里指向 A 盘的两个目录 junction 满足的（见上面「本机环境」）。
 * **构建在本机实测跑通过**：`./gradlew :app:assembleDebug` 出
-  `app/build/outputs/apk/debug/app-debug.apk`（9.3 MiB，三个 ABI 的 `libsubconv.so` 都在），
+  `app/build/outputs/apk/debug/app-debug.apk`（三个 ABI 的 `libsubconv.so` 都在），
   `./gradlew verifyKernel` 对着这个 APK 全过；同步挂在构建上这条链也实测过
   （`./gradlew :app:assembleDebug` 会先跑 `syncUpstream`，工作区已经干净时它一个字节都不动，
   后面 ninja 该 UP-TO-DATE 还是 UP-TO-DATE）。
+  **最近一次实测数据**（2026-09-28，锚点 `15ee993` = 支持生成链式代理）：
+  `assembleDebug` **BUILD SUCCESSFUL in 38s**（42 个任务全部执行，含三个 ABI 的
+  `buildCMakeDebug`），APK **10,498,344 B ≈ 10.0 MiB**；`verifyKernel` 三个 ABI 全 `OK`
+  且没有 `libc++_shared.so`。APK 比 `e3886f4` 那次的 9.3 MiB 大了约 0.7 MiB ——
+  这是链式代理带来的新代码（`chain.cpp` + 三个输出器），不是异常。
 * **release 那条路（= CI 跑的那条）也实测过**：同步到上游 `67fba3a` 之后
   `./gradlew :app:assembleRelease` → **BUILD SUCCESSFUL in 1m 43s**，出
   `app/build/outputs/apk/release/app-release-unsigned.apk`（5,894,826 B ≈ 5.6 MiB），

@@ -112,7 +112,17 @@ abstract class SyncUpstreamTask @Inject constructor(
             "src/core", "src/codec", "src/parse", "src/fetch", "src/emit", "src/server",
             "third_party/nlohmann",
         )
-        val UPSTREAM_FILES = listOf("data/web/index.html")
+        val UPSTREAM_FILES = listOf(
+            // 源文件列表 / 编译选项 / C++ 标准探测 / Web UI 内嵌 / 依赖发现的**唯一真源**。
+            // 它落地时会改名（见 UPSTREAM_RENAMES），由 Android 入口 include 进来 ——
+            // 于是 Android 侧不再维护任何一份源文件清单，上游加文件时零改动。
+            "CMakeLists.txt",
+            "data/web/index.html",
+        )
+
+        // 上游文件**落地时改名**的映射。AGP 的 CMake 入口必须叫 CMakeLists.txt，
+        // 同一个目录里放不下两个同名文件，所以上游那份取成 upstream.cmake。
+        val UPSTREAM_RENAMES = mapOf("CMakeLists.txt" to "upstream.cmake")
 
         // Android 自己的：本任务一概不碰（补丁也不该覆盖它们）
         val ANDROID_OWNED = listOf(
@@ -202,8 +212,11 @@ abstract class SyncUpstreamTask @Inject constructor(
         logger.lifecycle("")
         logger.lifecycle("== 比对 vendor 目录与上游")
         val cmp = compare(stage, cpp, manifest)
+        // 清单一律用**落地后**的名字比对：改名的那种文件（CMakeLists.txt -> upstream.cmake）
+        // 在 compare 里就完成了换名，这里与下游的覆写 / 补丁对账才对得上。
+        val destManifest = manifest.map { destRel(it) }
         val gone = relFiles(cpp)
-            .filter { isUpstreamOwned(it) && !manifest.contains(it) }
+            .filter { isUpstreamOwnedDest(it) && !destManifest.contains(it) }
             .sorted()
 
         logger.lifecycle("  新增 ${cmp.added.size} / 覆盖 ${cmp.updated.size} / 已一致 ${cmp.same} / 上游已无 ${gone.size}")
@@ -237,8 +250,11 @@ abstract class SyncUpstreamTask @Inject constructor(
             logger.lifecycle("")
             logger.lifecycle("== 覆盖 vendor 目录")
             var n = 0
-            (cmp.added + cmp.updated).forEach { rel ->
-                val dst = File(cpp, rel)
+            val changed = (cmp.added + cmp.updated).toSet()
+            manifest.forEach { rel ->
+                val dest = destRel(rel)
+                if (!changed.contains(dest)) return@forEach
+                val dst = File(cpp, dest)
                 dst.parentFile?.mkdirs()
                 File(stage, rel).copyTo(dst, overwrite = true)
                 n++
@@ -276,24 +292,56 @@ abstract class SyncUpstreamTask @Inject constructor(
             }
         }
 
-        // --- 7. CMakeLists 源文件列表检查（只报警告，不自动改） ---
+        // --- 7. 复用自检：Android 入口是否真的在用上游 CMakeLists ---
+        //
+        // 这一节以前查的是「Android 自己的 CMakeLists 有没有列全上游的 .cpp」。那份手抄的清单
+        // 就是漂移的来源：上游每加一个源文件就要手工补一行（历史上踩过三次），漏掉时还只在
+        // 链接期以 undefined reference 的形式炸出来。现在源文件列表只有上游一份 —— 入口
+        // include 落地成 upstream.cmake 的那份 —— 所以检查反过来做：谁要是又在 Android 入口里
+        // 抄一份清单，这里立刻叫。
         logger.lifecycle("")
-        logger.lifecycle("== 检查 CMakeLists.txt 的源文件列表")
-        val cmakeFile = File(cpp, "CMakeLists.txt")
-        val cmakeText = if (cmakeFile.isFile) cmakeFile.readText(Charsets.UTF_8) else ""
-        val listed = CMAKE_SRC_RE.findAll(cmakeText).map { it.groupValues[1] }.toSortedSet()
-        val upstreamCpp = manifest.filter { it.startsWith("src/") && it.endsWith(".cpp") }
-        val needAdd = upstreamCpp.filter { !listed.contains(it) }
-        val needDrop = listed.filter { !upstreamCpp.contains(it) && !ANDROID_OWNED.contains(it) }
-        if (needAdd.isEmpty() && needDrop.isEmpty()) {
-            logger.lifecycle("  一致：${upstreamCpp.size} 个上游 .cpp 都在列表里")
-        } else {
-            needAdd.forEach { logger.error("  ⚠ 上游新增的源文件没进 CMakeLists，会把链接搞崩：$it") }
-            needDrop.forEach { logger.error("  ⚠ CMakeLists 里列了、但上游已经没有的源文件：$it") }
-            logger.lifecycle("  请手工改 app/src/main/cpp/CMakeLists.txt 的 subconv_core 源文件列表（插在跟上游 CMakeLists.txt 相同的位置）。")
+        logger.lifecycle("== 检查 Android 入口是否复用上游 CMakeLists")
+        val cmakeProblems = mutableListOf<String>()
+        val entryFile = File(cpp, "CMakeLists.txt")
+        val sharedCmake = File(cpp, destRel("CMakeLists.txt"))
+        if (!sharedCmake.isFile) {
+            cmakeProblems += "缺少 ${sharedCmake.name}：上游的 CMakeLists.txt 没同步进来，入口 include 不到它"
         }
-        val androidExtra = listed.filter { !upstreamCpp.contains(it) }
-        logger.lifecycle("  CMakeLists 里 Android 自己加的源文件：${if (androidExtra.isEmpty()) "（无）" else androidExtra.joinToString(", ")}")
+        if (!entryFile.isFile) {
+            cmakeProblems += "缺少 Android 入口 ${entryFile.name}"
+        } else {
+            val entryText = entryFile.readText(Charsets.UTF_8)
+            if (!entryText.contains(sharedCmake.name)) {
+                cmakeProblems += "入口 ${entryFile.name} 没有引用 ${sharedCmake.name}"
+            }
+            // ANDROID_OWNED 那几行本来就该由入口自己加（上游没有它们），不算抄清单。
+            val hardcoded = CMAKE_SRC_RE.findAll(entryText)
+                .map { it.groupValues[1] }
+                .filter { !ANDROID_OWNED.contains(it) }
+                .toSortedSet()
+            if (hardcoded.isNotEmpty()) {
+                cmakeProblems += "入口 ${entryFile.name} 里又写死了一份源文件列表" +
+                    "（${hardcoded.joinToString(", ")}），应该由 ${sharedCmake.name} 提供 —— " +
+                    "删掉这些行，否则又要开始漂移"
+            }
+        }
+        // 顺便验上游自己的清单有没有列全它自己的源文件：那是上游的 bug，但在 Android 这边
+        // 会以 undefined reference 的形式炸出来，所以在这里先叫一声。
+        if (sharedCmake.isFile) {
+            val listed = CMAKE_SRC_RE.findAll(sharedCmake.readText(Charsets.UTF_8))
+                .map { it.groupValues[1] }
+                .toSortedSet()
+            val srcCpp = manifest.filter { it.startsWith("src/") && it.endsWith(".cpp") }
+            val missing = srcCpp.filter { !listed.contains(it) }
+            if (missing.isEmpty()) {
+                logger.lifecycle(
+                    "  ${sharedCmake.name} 列全了 ${srcCpp.size} 个 src/*.cpp —— Android 侧不再维护任何源文件清单",
+                )
+            } else {
+                cmakeProblems += "${sharedCmake.name} 没列上自己的源文件：${missing.joinToString(", ")}（上游 bug）"
+            }
+        }
+        cmakeProblems.forEach { logger.error("  ⚠ $it") }
 
         // --- 8. 锚点前移 ---
         if (updatePin.get() && !dry) {
@@ -327,9 +375,8 @@ abstract class SyncUpstreamTask @Inject constructor(
         // 严格模式（CI 用）：源文件列表不齐就直接失败。默认关 —— 平时它只是一条警告，
         // 但 CI 是「每次都拿上游最新」，上游新增 .cpp 是迟早的事，等到链接期才报
         // undefined reference，排查成本比这里红一条高得多。
-        if (strict.get() && (needAdd.isNotEmpty() || needDrop.isNotEmpty())) {
-            problems += "CMakeLists.txt 的源文件列表和上游对不上：${(needAdd + needDrop).joinToString(", ")}" +
-                "（在 app/src/main/cpp/CMakeLists.txt 里手工加/删，位置照上游 CMakeLists.txt 的排列）"
+        if (strict.get() && cmakeProblems.isNotEmpty()) {
+            problems += "Android 入口没有正确复用上游 CMakeLists：${cmakeProblems.joinToString("；")}"
         }
         if (!dry) {
             val onlyPatch = drift.filter { !expected.contains(it) }
@@ -473,16 +520,24 @@ abstract class SyncUpstreamTask @Inject constructor(
 
     private data class Cmp(val added: List<String>, val updated: List<String>, val same: Int)
 
+    /**
+     * 逐字节比对上游归档与 vendor 目录。
+     *
+     * 返回的清单一律是**落地后的相对路径**（`destRel`）：下游要做的三件事 —— 覆盖写入、
+     * 与补丁目标对账、上报「多出来的差异」—— 全在 vendor 目录里，换名在这里一次做完，
+     * 调用方不用再关心哪个文件改过名。
+     */
     private fun compare(stage: File, cpp: File, manifest: List<String>): Cmp {
         val added = mutableListOf<String>()
         val updated = mutableListOf<String>()
         var same = 0
         manifest.forEach { rel ->
-            val a = File(cpp, rel)
+            val dest = destRel(rel)
+            val a = File(cpp, dest)
             if (!a.isFile) {
-                added += rel
+                added += dest
             } else if (sha256(a) != sha256(File(stage, rel))) {
-                updated += rel
+                updated += dest
             } else {
                 same++
             }
@@ -533,10 +588,24 @@ abstract class SyncUpstreamTask @Inject constructor(
         }
     }
 
+    /** 上游相对路径 -> 在 vendor 目录里实际落地的名字（改了名的见 UPSTREAM_RENAMES）。 */
+    private fun destRel(rel: String): String = UPSTREAM_RENAMES[rel] ?: rel
+
     private fun isUpstreamOwned(rel: String): Boolean {
         if (ANDROID_OWNED.contains(rel)) return false
         if (UPSTREAM_DIRS.any { rel == it || rel.startsWith("$it/") }) return true
         return UPSTREAM_FILES.contains(rel)
+    }
+
+    /** 同 [isUpstreamOwned]，但入参是**落地后**的名字 —— 用于反查「上游已经没有了的文件」。 */
+    private fun isUpstreamOwnedDest(dest: String): Boolean {
+        if (ANDROID_OWNED.contains(dest)) return false
+        // 改名后的落地名属于上游。
+        if (UPSTREAM_RENAMES.values.contains(dest)) return true
+        // 而**改名前的原名**在 vendor 目录里恰恰不是上游的东西 —— 它正是 Android 自己的入口
+        // （CMakeLists.txt）。少了这一条，清理逻辑会把入口当作「上游已删除的文件」删掉。
+        if (UPSTREAM_RENAMES.containsKey(dest)) return false
+        return isUpstreamOwned(dest)
     }
 
     private fun relFiles(root: File): List<String> {

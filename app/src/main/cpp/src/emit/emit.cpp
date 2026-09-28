@@ -30,6 +30,19 @@ std::string config_header(std::string_view target, std::size_t node_count,
   return line;
 }
 
+std::string unique_name(std::set<std::string>& taken, std::string base) {
+  if (base.empty()) base = "node";
+  // Clash 要求 proxy 名称唯一，否则加载失败；sing-box 的 tag、Xray 的 outbound tag 同理
+  // （Xray 对重名 outbound 只是警告，但 balancer selector 会指错）。
+  std::string candidate = base;
+  int suffix = 2;
+  while (!taken.insert(candidate).second) {
+    candidate = base + " " + std::to_string(suffix++);
+    if (suffix > 10000) break;
+  }
+  return candidate;
+}
+
 NodeList prepare_nodes(const NodeList& nodes, const EmitOptions& opts) {
   NodeList out;
   out.reserve(nodes.size());
@@ -51,15 +64,7 @@ NodeList prepare_nodes(const NodeList& nodes, const EmitOptions& opts) {
     ProxyNode copy = node;
     std::string base = copy.name;
     if (base.empty()) base = copy.server + ":" + std::to_string(copy.port);
-
-    // Clash 要求 proxy 名称唯一，否则加载失败
-    std::string candidate = base;
-    int suffix = 2;
-    while (!seen_name.insert(candidate).second) {
-      candidate = base + " " + std::to_string(suffix++);
-      if (suffix > 10000) break;
-    }
-    copy.name = candidate;
+    copy.name = unique_name(seen_name, std::move(base));
     out.push_back(std::move(copy));
   }
 

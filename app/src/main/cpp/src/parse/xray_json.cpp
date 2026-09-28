@@ -289,9 +289,12 @@ void apply_sockopt(ProxyNode& node, const Json& stream, const std::string& label
   if (jbool(*sockopt, "tcpFastOpen")) node.tfo = true;
   if (jbool(*sockopt, "tcpMptcp")) node.mptcp = true;
   if (const std::string dialer = jstring(*sockopt, "dialerProxy"); !dialer.empty()) {
-    // 链式代理（先走另一条出站再出去）本工具的模型里没有，忽略会变成直连 —— 必须说清楚
-    warnings.push_back("节点 " + label + "：出站使用 dialerProxy（链式代理）-> " + dialer +
-                       "，本工具不支持链路，已忽略该字段");
+    // 链式代理（先走另一条出站再出去）：原样记下这个出站 tag，输出 xray 目标时再反查成
+    // 本工具最终用的名字（见 src/emit/chain.cpp）。查不到就告警并按直连处理 —— 静默丢掉
+    // 会变成直连，是这个场景里最危险的一种「看起来正常」。
+    (void)label;
+    (void)warnings;
+    node.dialer_proxy = dialer;
   }
 }
 
@@ -336,7 +339,8 @@ void scan_outbound(const Json& outbound, const std::string& base_name, std::size
   const Json* stream = member(outbound, "streamSettings");
   // 节点名：数组形态用配置根级的 remarks（面板加的），
   // 单配置形态退到出站 tag（v2rayN 之类的工具会把节点名写在 tag 上）。
-  const std::string base = base_name.empty() ? codec::trim(jstring(outbound, "tag")) : base_name;
+  const std::string tag = codec::trim(jstring(outbound, "tag"));
+  const std::string base = base_name.empty() ? tag : base_name;
 
   // 一组出站可能对应多个服务端/用户（vnext+users、servers[]），先都收集起来再统一处理。
   NodeList produced;
@@ -424,6 +428,8 @@ void scan_outbound(const Json& outbound, const std::string& base_name, std::size
     node.name = base.empty() ? ("节点 " + std::to_string(fallback_index))
                              : (produced.size() == 1 ? base
                                                      : base + " #" + std::to_string(i + 1));
+    // 出站 tag：dialerProxy（链式代理）引用的是它，输出侧要靠它反查成本工具最终用的名字。
+    node.source_name = tag;
     const std::string label = node.name;
     if (stream != nullptr) {
       if (!apply_transport(node, *stream, label, sub.warnings)) continue;

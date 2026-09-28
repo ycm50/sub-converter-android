@@ -18,22 +18,45 @@
 | `0002-http-backend.patch` | `src/fetch/http.cpp` | §2 抓订阅的 HTTP 客户端换后端 | +32 / −3 |
 | `0003-certprobe-split.patch` | `src/fetch/certprobe.cpp` | §3 `--probe-cert` 在 Android 上也能用 | +25 / −23 |
 | `0004-console-logcat.patch` | `src/core/console.cpp` | §5 让提示进 logcat | +18 / −1 |
+| `0005-cmake-embed.patch` | `upstream.cmake`（上游 `CMakeLists.txt` 改名落地后的名字） | §7 让上游 CMakeLists 能被复用 | +22 / −11 |
 
-合计 **+195 / −30，5 个文件**。
+合计 **+217 / −41，6 个文件**。
 
-`UPSTREAM.md` 的 §4（`src/fetch/android_http.cpp`）和 §6（`CMakeLists.txt`）**不在补丁里**：
-那是 Android 自己新增/重写的文件，本来就不属于上游，同步任务也不会碰它们
-（「边界」清单只有一份，在 `gradle/subconv-upstream.gradle.kts` 顶部的
-`UPSTREAM_DIRS` / `UPSTREAM_FILES` / `ANDROID_OWNED`）。
+`UPSTREAM.md` 的 §4（`src/fetch/android_http.cpp`）**不在补丁里**：那是 Android 自己新增的文件，
+本来就不属于上游，同步任务也不会碰它（「边界」清单只有一份，在
+`gradle/subconv-upstream.gradle.kts` 顶部的 `UPSTREAM_DIRS` / `UPSTREAM_FILES` / `ANDROID_OWNED`）。
+Android 的 `CMakeLists.txt` 入口同样不在补丁里 —— 0005 改的是**上游那份**，见下一节。
+
+## `upstream.cmake` 是怎么来的（0005 为什么改的是它）
+
+上游的 `CMakeLists.txt` 也是**上游所属**文件（在 `UPSTREAM_FILES` 里），但它落地时会**改名**成
+`upstream.cmake`：AGP 的 CMake 入口必须叫 `CMakeLists.txt`，同一个目录里放不下两个同名文件。
+改名映射只有一处定义 —— `gradle/subconv-upstream.gradle.kts` 顶部的 `UPSTREAM_RENAMES`。
+
+于是 `app/src/main/cpp/CMakeLists.txt` 是 Android 自己的入口，它只做三件事：关掉用不到的能力
+（CLI / 单测 / curl / OpenSSL）、建出内置的 yaml-cpp 目标、然后 `include(upstream.cmake)`。
+**源文件列表、编译选项、C++ 标准探测、依赖发现、Web UI 内嵌全部来自上游那一份** ——
+Android 侧不再维护任何源文件清单。这就是「上游新增源文件时不用手工补一行」的原因；
+`syncUpstream` 的第 7 步会反过来盯着这件事：入口里要是又出现写死的 `src/*.cpp`，直接报错。
+
+`SUBCONV_BUILD_CLI` 是 0005 加进上游那份的开关（默认 `ON`，所以上游与桌面的构建行为一字不变）：
+关掉后上游不产出 CLI 目标，`subconv` 这个名字就空出来给 JNI 的 `libsubconv.so` 用 ——
+Android 只链接 `subconv_core`，也不需要把上游的 `src/cli/` vendor 进来。
+
+补丁里的路径写的是 `a/upstream.cmake b/upstream.cmake` —— 这是**从 vendor 目录看**的路径；
+同步任务套补丁时的工作目录就是 vendor 目录，所以手工套的时候仍然用下面那条
+`--directory=app/src/main/cpp`。
 
 ## 为什么是补丁，而不是一条 fork 分支
 
-* **看得见**：改动只有 5 个文件，补丁加起来 ~16 KB，review 的代价是分钟级；
+* **看得见**：改动只有 6 个文件，补丁加起来 ~19 KB，review 的代价是分钟级；
   fork 出去一条分支，代价就变成「和上游比 diff」，上游每动一次都更贵。
-* **套得回去**：上游在这 5 个文件上的改动大多是新增分支、拆函数、加一条日志，
+* **套得回去**：上游在这 6 个文件上的改动大多是新增分支、拆函数、加一条日志，
   行号会漂但上下文不会 —— 补丁失败时是**明确报错**，不是静默编歪。
-* **边界清楚**：同步任务只覆盖「上游所属」的路径，Android 自己的文件（JNI 桥、Web UI、
-  yaml-cpp、CMakeLists）永远在射程之外，不存在「顺手把适配层覆盖掉」这种事。
+* **边界清楚**：同步任务只覆盖「上游所属」的路径，Android 自己的文件（入口 `CMakeLists.txt`、
+  JNI 桥、Web UI 之外的适配层、yaml-cpp）永远在射程之外，不存在「顺手把适配层覆盖掉」这种事。
+  上游那份 `CMakeLists.txt` 是**共用的**（改名成 `upstream.cmake` 后由入口 include），
+  所以它既在射程内、又不需要谁去维护第二份源文件列表。
 
 ## 怎么套
 

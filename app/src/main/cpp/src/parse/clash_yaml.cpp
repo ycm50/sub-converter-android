@@ -117,6 +117,21 @@ std::vector<std::string> ylist(const YamlNode& n) {
   return out;
 }
 
+/// mihomo 的 `dialer-proxy`（链式代理）：值可以是代理名，也可以是**代理组**名。
+/// 本工具只认字符串形态 —— 列表形态（多级链路）的顺序语义没有权威文档可依，宁可明确
+/// 告警也不猜一个方向写进配置（猜错就是「看起来链上了、其实没链」）。
+void apply_dialer_proxy_from_yaml(ProxyNode& node, const YamlNode& p,
+                                  std::vector<std::string>& warnings) {
+  const YamlNode value = p["dialer-proxy"];
+  if (!value) return;
+  if (value.IsScalar()) {
+    node.dialer_proxy = codec::trim(ystr(p, "dialer-proxy"));
+    return;
+  }
+  warnings.push_back("节点 " + node.name +
+                     "：dialer-proxy 是列表形态（多级链路），本工具只解析字符串形态，已忽略");
+}
+
 void apply_tls_from_yaml(ProxyNode& node, const YamlNode& p) {
   const std::string sni = ystr_any(p, {"sni", "servername", "server-name"});
   if (!sni.empty()) node.tls.sni = sni;
@@ -238,7 +253,7 @@ void apply_transport_from_yaml(ProxyNode& node, const YamlNode& p) {
   }
 }
 
-Result<ProxyNode> proxy_from_yaml(const YamlNode& p) {
+Result<ProxyNode> proxy_from_yaml(const YamlNode& p, std::vector<std::string>& warnings) {
   const std::string type = codec::to_lower(ystr(p, "type"));
   if (type.empty()) return fail("proxy 缺少 type 字段");
 
@@ -248,6 +263,9 @@ Result<ProxyNode> proxy_from_yaml(const YamlNode& p) {
   ProxyNode node;
   node.protocol = *protocol;
   node.name = ystr(p, "name");
+  // 代理名就是 dialer-proxy 的引用键（见 include/subconv/types.hpp 的 source_name）
+  node.source_name = node.name;
+  apply_dialer_proxy_from_yaml(node, p, warnings);
   node.server = ystr(p, "server");
   const int port = yint(p, "port", 0);
   // WireGuard 的 server/port 属于 peer（见下面的 case），顶层可以完全没有这两个字段，
@@ -509,7 +527,7 @@ Result<Subscription> parse_clash_yaml(std::string_view yaml, std::string source)
       sub.warnings.push_back("第 " + std::to_string(index) + " 个 proxy 不是映射，已跳过");
       continue;
     }
-    auto node = proxy_from_yaml(entry);
+    auto node = proxy_from_yaml(entry, sub.warnings);
     if (!node) {
       const std::string name = ystr(entry, "name");
       sub.warnings.push_back("第 " + std::to_string(index) + " 个 proxy 解析失败" +

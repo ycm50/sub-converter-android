@@ -2,6 +2,8 @@
 //
 // 目标内核：mihomo（Clash.Meta 系，含 vless / hysteria2 / tuic / reality）。
 // `--clash-legacy` 会跳过 mihomo 专有字段，并拒绝 meta 独有协议，以便原版 Clash 加载。
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -205,8 +207,10 @@ void add_transport(Yaml& y, const ProxyNode& n) {
 // 单节点
 // ---------------------------------------------------------------------------
 /// 返回 Null 表示该节点无法转换（已记录 warning）。
+/// dialer 非空时写 mihomo 的 `dialer-proxy`（链式代理）：本条代理的底层连接先交给那条代理去建。
+/// 文档：https://wiki.metacubex.one/config/proxies/dialer-proxy/
 Yaml build_proxy(const ProxyNode& n, const EmitOptions& opts,
-                 std::vector<std::string>& warnings) {
+                 std::vector<std::string>& warnings, const std::string& dialer = {}) {
   const bool legacy = opts.clash_legacy;
 
   auto reject = [&](const char* reason) {
@@ -230,6 +234,15 @@ Yaml build_proxy(const ProxyNode& n, const EmitOptions& opts,
   Yaml y = Yaml::mapping();
   y.set("name", Yaml::scalar(n.name));
   y.set("type", Yaml::scalar(clash_type(n.protocol)));
+  // 链式代理在这里就写：wireguard 分支会提前 return，放到函数末尾就漏了。
+  if (!dialer.empty()) {
+    if (legacy) {
+      warnings.push_back("节点 " + n.name +
+                         "：原版 Clash（--clash-legacy）没有 dialer-proxy 字段，已忽略链路");
+    } else {
+      y.set("dialer-proxy", Yaml::scalar(dialer));
+    }
+  }
   // wireguard 没有顶层的 server/port —— endpoint 属于每个 peer，mihomo 的简化语法虽然也认
   // 顶层这两个字段，但同时写 peers: 时它们会被忽略；只写 peers: 更贴近官方文档的完整语法。
   if (n.protocol != Protocol::WireGuard) {
@@ -490,18 +503,105 @@ Result<std::string> emit_clash(const NodeList& nodes, const EmitOptions& opts,
   const NodeList prepared = prepare_nodes(nodes, opts);
   if (prepared.empty()) return fail("去重后没有可输出的节点");
 
+  // 链式代理：链路是用户显式指定的基础设施，任何一跳写不出来就直接报错 ——
+  // 静默降级成直连会把流量按真实 IP 放出去。
+  auto plan = resolve_chain(prepared, opts, warnings);
+  if (!plan) return fail(plan.error());
+  const std::map<std::string, std::string> ref_index = build_dialer_index(prepared);
+  // 输入自带引用成环时先拦下来：内核不一定拒绝这种配置，真连上去才会死循环 / 超时。
+  if (!plan->active()) {
+    if (const auto cycle = dialer_cycle(prepared, ref_index); !cycle.empty()) {
+      return fail("输入配置的链式代理成环：" + codec::join(cycle, " -> ") +
+                  "（dialer-proxy 首尾相接会死循环，无法转换）");
+    }
+  }
+
   // 被跳过的节点：既写成配置文件里的注释，也交给调用方（CLI 打到 stderr / Web UI 显示），
   // 与 links / base64 目标保持一致的告知方式
   std::vector<std::string> skipped;
+  std::vector<std::string> chain_caveats;
   Yaml proxies = Yaml::sequence();
+  std::set<std::string> hop_names;
+
+  for (const auto& hop : plan->hops) {
+    hop_names.insert(hop.tag);
+    // 链路中间那一跳本身也要经上一跳出去 —— 它走 UDP 的话同样链不通，必须一起告警。
+    // 注意这一条要在 `continue` 之前判：引用订阅节点的跳点（extra=false）不会在这里产出出站，
+    // 但它的 dialer 一样会被写进那份复用出来的代理上。
+    if (!hop.dialer.empty()) {
+      const std::string caveat = chain_exit_caveat(hop.node);
+      if (!caveat.empty()) chain_caveats.push_back(caveat);
+    }
+    if (!hop.extra) continue;
+    std::vector<std::string> hop_skipped;
+    Yaml proxy = build_proxy(hop.node, opts, hop_skipped, hop.dialer);
+    if (proxy.is_null()) {
+      return fail("链路节点 " + hop.node.name + " 无法写进 clash 配置：" +
+                  (hop_skipped.empty() ? std::string("该协议尚未支持输出到 clash")
+                                       : codec::join(hop_skipped, "；")));
+    }
+    proxies.push(std::move(proxy));
+  }
+
+  Yaml exit_names = Yaml::sequence();   // 只装真正的落地节点（链路跳点不进分组）
   for (const auto& node : prepared) {
-    Yaml proxy = build_proxy(node, opts, skipped);
-    if (!proxy.is_null()) proxies.push(std::move(proxy));
+    const std::string dialer = effective_dialer(node, *plan, ref_index, warnings);
+    // 有后置链路时，这个节点自己变成链路里的中间跳点，流量落点是后置链路的末端
+    // （末端代理的名字里带着「节点 → 后置」，进分组的是它）。
+    const RearChain* rear = plan->rear_for(node.name);
+    std::vector<std::string> node_warnings;
+    Yaml proxy = build_proxy(node, opts, node_warnings, dialer);
+    if (proxy.is_null()) {
+      if (rear != nullptr || hop_names.count(node.name) != 0) {
+        return fail("链路节点 " + node.name + " 无法写进 clash 配置：" +
+                    (node_warnings.empty() ? std::string("该协议尚未支持输出到 clash")
+                                           : codec::join(node_warnings, "；")) +
+                    "（链路是显式指定的，不能静默降级成直连）");
+      }
+      // 产出失败：把它记成「被跳过的节点」
+      for (auto& w : node_warnings) skipped.push_back(std::move(w));
+      continue;
+    }
+    // 成功产出时也可能带告警（例如 --clash-legacy 下链路被忽略）——必须一并收下，
+    // 只在失败分支收会把「链路被静默丢掉」这件事吞掉，那是这个功能最不能出的错。
+    for (auto& w : node_warnings) skipped.push_back(std::move(w));
+    if (!dialer.empty()) {
+      const std::string caveat = chain_exit_caveat(node);
+      if (!caveat.empty()) chain_caveats.push_back(caveat);
+    }
+
+    if (rear != nullptr) {
+      // 后置链路：逐跳产出，hops.back() 才是流量落点。
+      // 每一跳都是经上一跳的 TCP 隧道到达的，所以每一跳都要过 UDP 兼容性检查。
+      for (const auto& hop : rear->hops) {
+        const std::string caveat = chain_exit_caveat(hop.node);
+        if (!caveat.empty()) chain_caveats.push_back(caveat);
+        std::vector<std::string> hop_skipped;
+        Yaml hop_proxy = build_proxy(hop.node, opts, hop_skipped, hop.dialer);
+        if (hop_proxy.is_null()) {
+          return fail("后置链路节点 " + hop.node.name + " 无法写进 clash 配置：" +
+                      (hop_skipped.empty() ? std::string("该协议尚未支持输出到 clash")
+                                           : codec::join(hop_skipped, "；")) +
+                      "（链路是显式指定的，不能静默降级成直连）");
+        }
+        for (auto& w : hop_skipped) skipped.push_back(std::move(w));
+        proxies.push(std::move(hop_proxy));
+      }
+      exit_names.push(Yaml::scalar(rear->target()));
+    } else {
+      exit_names.push(Yaml::scalar(node.name));
+    }
+    proxies.push(std::move(proxy));
   }
   if (warnings != nullptr) {
     for (const auto& w : skipped) warnings->push_back(w);
+    if (!chain_caveats.empty()) {
+      warnings->push_back("链路上这些节点的传输本身就依赖 UDP（" +
+                          codec::join(chain_caveats, "、") +
+                          "）：dialer-proxy 是按 TCP 建的隧道，链上大概率连不通，建议避开这些节点");
+    }
   }
-  if (proxies.empty()) {
+  if (exit_names.empty()) {
     const std::string detail =
         skipped.empty() ? std::string() : ("：\n  - " + codec::join(skipped, "\n  - "));
     return fail("没有任何节点能转换为 clash 格式" + detail);
@@ -511,11 +611,7 @@ Result<std::string> emit_clash(const NodeList& nodes, const EmitOptions& opts,
   const std::string g_auto = opts.emoji ? "♻️ 自动选择" : "自动选择";
   const std::string g_final = opts.emoji ? "🐟 漏网之鱼" : "漏网之鱼";
 
-  Yaml all_names = Yaml::sequence();
-  for (const auto& proxy : proxies.items()) {
-    const Yaml* name = proxy.get("name");
-    all_names.push(Yaml::scalar(name != nullptr ? name->as_string() : std::string()));
-  }
+  Yaml all_names = exit_names;
 
   // --- proxy-groups ---
   Yaml groups = Yaml::sequence();
@@ -590,6 +686,12 @@ Result<std::string> emit_clash(const NodeList& nodes, const EmitOptions& opts,
   if (opts.include_rules) root.set("rules", std::move(rules));
 
   std::string out = config_header("clash", prepared.size(), opts.filename);
+  if (plan->active()) {
+    std::vector<std::string> tags;
+    tags.reserve(plan->hops.size());
+    for (const auto& hop : plan->hops) tags.push_back(hop.tag);
+    out += "# 链式代理: 本地 -> " + codec::join(tags, " -> ") + " -> 每个节点\n";
+  }
   if (!skipped.empty()) {
     out += "# 告警: " + std::to_string(skipped.size()) + " 个节点被跳过\n";
     for (const auto& w : skipped) out += "#   " + w + "\n";

@@ -217,6 +217,16 @@ struct ProxyNode {
   bool mptcp = false;
   bool scv = false;                 ///< 单项跳过证书校验（覆盖 tls.insecure）
 
+  /// 链式代理引用（**输入侧**原样保留的那一份）：本节点建立连接前要先经过的出站。
+  ///   * Xray JSON：`streamSettings.sockopt.dialerProxy`
+  ///   * mihomo / Clash：`dialer-proxy`
+  /// 值是**对方配置里**的标识（Xray 的出站 tag / mihomo 的代理名），所以输出时要先按
+  /// source_name 反查成本工具最终使用的名字（含 emoji 与去重后缀）。空串 = 直连。
+  std::string dialer_proxy;
+  /// 输入侧的原标识：Xray 出站的 `tag`、mihomo 代理的 `name`。
+  /// 只用于解析 `dialer_proxy` 的引用关系 —— 本工具自己的名字会经过 emoji / 去重改名。
+  std::string source_name;
+
   /// 已解码但尚未建模的字段，避免信息丢失。
   std::map<std::string, std::string> extra;
 

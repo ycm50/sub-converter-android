@@ -23,11 +23,26 @@ build/
 .externalNativeBuild/
 captures/
 
+# tools/build-native.ps1 -Install 的落点：编出来的 .so 再拷一份进 jniLibs。
+# 它仍然是**产物**，不是源码 —— 本工程进包的那份 .so 由 AGP 的 externalNativeBuild
+# 现场编（见 README「本机环境」）；只有把 externalNativeBuild 关掉、改走 jniLibs 时
+# 它才会变成「必须提交」的东西，那时用 git add -f 单独放行。
+app/src/main/jniLibs/
+
 # 打出来的包
 *.apk
 *.aab
 *.ap_
 *.apk.sha1
+
+# ---------------------------------------------------------------------------
+# 同步上游时的中间产物
+# ---------------------------------------------------------------------------
+# ./gradlew syncUpstream -Psubconv.reject=true 会把套不上的补丁落成 .rej（落在
+# app/src/main/cpp 这份**被跟踪**的目录里），git apply 也可能留下 .orig；
+# 它们是人工处理冲突的现场，处理完就该消失 —— 别让它们混进提交。
+*.rej
+*.orig
 
 # ---------------------------------------------------------------------------
 # IDE 状态

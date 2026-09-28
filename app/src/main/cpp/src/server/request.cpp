@@ -72,6 +72,34 @@ long long_param(const std::map<std::string, std::string>& params, const char* ke
   return it == params.end() ? fallback : parse_long(it->second, fallback);
 }
 
+/// 收集所有链路参数（`chain` / `chain_rear` 的别名一起收）：允许重复出现（顺序即链路顺序），
+/// 也允许用 `|` 分隔多项。
+/// 刻意不用 `,` 分隔 —— 分享链接的 fragment（节点名）里本来就可能带逗号。
+std::vector<std::string> collect_chain(std::string_view query,
+                                       const std::vector<std::string>& keys) {
+  std::vector<std::string> out;
+  for (const auto& raw : codec::split(query, '&')) {
+    if (raw.empty()) continue;
+    const auto eq = raw.find('=');
+    if (eq == std::string::npos) continue;
+    const std::string key = codec::to_lower(codec::percent_decode(std::string_view(raw).substr(0, eq)));
+    bool wanted = false;
+    for (const auto& k : keys) {
+      if (k == key) {
+        wanted = true;
+        break;
+      }
+    }
+    if (!wanted) continue;
+    for (const auto& piece : codec::split(codec::percent_decode(std::string_view(raw).substr(eq + 1)),
+                                          '|')) {
+      const std::string item = codec::trim(piece);
+      if (!item.empty()) out.push_back(item);
+    }
+  }
+  return out;
+}
+
 /// 逗号分隔的列表参数：键不存在返回 nullopt（保留默认值）；
 /// 键存在但为空（`?rulesets=`）返回**空列表**，表示「一个规则集都不要」。
 std::optional<std::vector<std::string>> list_param(const std::map<std::string, std::string>& params,
@@ -123,6 +151,10 @@ Result<ConvertRequest> request_from_query(std::string_view query, const ServerOp
   req.emit.probe_cert = flag(params, "probe_cert", req.emit.probe_cert);
   req.emit.probe_cert_timeout_seconds = static_cast<int>(
       long_param(params, "probe_cert_timeout", req.emit.probe_cert_timeout_seconds));
+  // 链式代理：`?chain=<分享链接|节点名>`（前置，最外侧在前）与
+  // `?chain_rear=<...>`（后置，最内侧在前），都可重复，也都支持 `|` 分隔
+  req.emit.chain = collect_chain(query, {"chain", "front_proxy"});
+  req.emit.chain_rear = collect_chain(query, {"chain_rear", "rear_chain", "rear_proxy"});
 
   req.load.http.proxy = text_param(params, "proxy", req.load.http.proxy);
   req.load.http.user_agent = text_param(params, "ua", req.load.http.user_agent);
@@ -223,6 +255,34 @@ Result<ConvertRequest> request_from_json(std::string_view body, const ServerOpti
     req.emit.probe_cert = get_bool(options, "probe_cert", req.emit.probe_cert);
     req.emit.probe_cert_timeout_seconds = static_cast<int>(
         get_long(options, "probe_cert_timeout", req.emit.probe_cert_timeout_seconds));
+    // 链式代理：数组，或「| 分隔 / 换行分隔」的字符串；顺序即链路顺序。
+    // `chain` = 前置（最外侧在前），`chain_rear` = 后置（最内侧在前）。
+    // 显式给空数组 => 清空链路。
+    auto read_chain_list = [&](const char* key) -> std::optional<std::vector<std::string>> {
+      const auto it = options.find(key);
+      if (it == options.end()) return std::nullopt;
+      std::vector<std::string> items;
+      if (it->is_array()) {
+        for (const auto& item : *it) {
+          if (item.is_string()) items.push_back(codec::trim(item.get<std::string>()));
+        }
+      } else if (it->is_string()) {
+        for (const auto& piece : codec::split(it->get<std::string>(), '|')) {
+          for (const auto& line : codec::split(piece, '\n')) items.push_back(codec::trim(line));
+        }
+      }
+      std::vector<std::string> kept;
+      for (auto& item : items) {
+        if (!item.empty()) kept.push_back(std::move(item));
+      }
+      return kept;
+    };
+    if (auto list = read_chain_list("chain"); list.has_value()) {
+      req.emit.chain = std::move(*list);
+    }
+    if (auto list = read_chain_list("chain_rear"); list.has_value()) {
+      req.emit.chain_rear = std::move(*list);
+    }
   }
 
   if (const auto it = root.find("fetch"); it != root.end() && it->is_object()) {

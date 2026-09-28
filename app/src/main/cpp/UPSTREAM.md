@@ -9,7 +9,7 @@ HTTP 服务 + 内嵌 Web UI；本 App 要做的正是这件事：启动即等价
 |---|---|
 | 上游仓库 | `https://github.com/ycm50/sub-converter` |
 | 分支 | `main` |
-| 移植基线 commit | `e3886f4bd88fc13d122be3a825b065550c4a8a18`（2026-09-26） |
+| 移植基线 commit | `8e857b29047e44b9acec9f9eeddd95cce341f8ec`（2026-09-28，`支持生成链式代理 增加前置后置代理`） |
 | 上游版本 | 0.1.0 |
 | 移植日期 | 2026-09-14 |
 
@@ -51,9 +51,11 @@ HTTP 服务 + 内嵌 Web UI；本 App 要做的正是这件事：启动即等价
 | `third_party/nlohmann/json.hpp` | 同名 | 原样拷贝（单头文件库） |
 | `third_party/yaml-cpp/` | — | 新vendor进来的 yaml-cpp **0.8.0**（见下） |
 | `data/web/index.html` | `data/web/index.html` | 原样拷贝，配置期被读成 C++ 字符串内嵌进 `.so` |
+| `upstream.cmake` | `CMakeLists.txt` | 上游的构建脚本，**改名落地**（AGP 的入口必须叫 `CMakeLists.txt`，同目录放不下两个同名文件）。由入口 `include()` 复用，见 §7 |
+| `CMakeLists.txt`（本目录） | — | 新增：Android 自己的 CMake 入口，只关能力开关 + `include(upstream.cmake)`，**不含源文件清单** |
 | `android/` | — | 新增：JNI 入口 + Android 侧 HTTP/证书桥 |
-| `src/cli/main.cpp` | `src/cli/main.cpp` | **未拷贝**：Android 上没有命令行入口，宿主是 JNI |
-| `tests/`、`CMakeLists.txt`、`build.sh` 等 | 同名 | **未拷贝**：与 App 构建无关 |
+| `src/cli/main.cpp` | `src/cli/main.cpp` | **未拷贝**：Android 上没有命令行入口，宿主是 JNI（上游在 `SUBCONV_BUILD_CLI=OFF` 时也不引用它） |
+| `tests/`、`build.sh` 等 | 同名 | **未拷贝**：与 App 构建无关 |
 
 ## 对上游代码的改动（全部在下面列出，其余逐字节一致）
 
@@ -100,11 +102,35 @@ App 进程没有控制台，`stdout/stderr` 会掉进 `/dev/null`：`Web UI: htt
 把面向人的提示同时写进 `__android_log_write`（tag `subconv`，stderr → ERROR / stdout → INFO），
 原有的 `fwrite` 保留。**只影响提示**：配置载荷从来不走 `console`（见 `console.hpp` 的约定）。
 
-### 6. `CMakeLists.txt`（本目录，重写）
+### 6. `CMakeLists.txt`（本目录，Android 自己的 CMake 入口）
 
-上游那份是给桌面/CLI 用的：会找 libcurl / OpenSSL / yaml-cpp、编 CLI 和单测。
-Android 这份：只编 `subconv_core` 静态库 + `libsubconv.so`，内嵌 Web UI 的方式与上游一致
-（配置期 `file(READ)` → `generated/web_ui.hpp`）。
+只做 Android 与上游不一样的事，**不含任何源文件清单**：
+
+* 能力开关：`SUBCONV_BUILD_CLI` / `SUBCONV_BUILD_TESTS` / `SUBCONV_USE_CURL` /
+  `SUBCONV_USE_OPENSSL` 关掉，`SUBCONV_USE_YAML` 打开。必须在 `include` 之前设 ——
+  上游用的是 `option()`，而它尊重已经存在的缓存项。
+* 内置 yaml-cpp：先 `add_subdirectory(third_party/yaml-cpp)` 建出 `yaml-cpp` 目标，上游那段
+  `find_package` 找不到后落到 `TARGET yaml-cpp`，于是自然命中（不需要上游感知 Android）。
+* 补一道上游没有的检查：`data/web/index.html` 里一旦出现 `)SUBCONVHTML"` 就直接报错 ——
+  那种情况会把生成的 C++ 切断，而报错完全指不到这里。
+* `include(upstream.cmake)`，然后补上 Android 专有的 `src/fetch/android_http.cpp`、
+  `SUBCONV_HAVE_ANDROID_HTTP=1`、`liblog`，最后定义 JNI 的 `libsubconv.so`。
+
+### 7. `upstream.cmake` —— 复用上游 CMakeLists（补丁 0005）
+
+上游的 `CMakeLists.txt` 是**上游所属**文件：同步任务把它取下来后改名成 `upstream.cmake`
+（改名映射只有一处，在 `gradle/subconv-upstream.gradle.kts` 的 `UPSTREAM_RENAMES`），
+再由入口 `include()` 进来。
+
+于是**源文件列表、编译选项、C++ 标准探测、依赖发现、Web UI 内嵌都只有上游一份**：上游新增或
+删除源文件时，Android 侧一个字都不用改。这条不是靠自觉，`syncUpstream` 第 7 步会反过来盯：
+入口里要是又出现写死的 `src/*.cpp`，或者 `upstream.cmake` 没被入口引用、没列全上游自己的
+源文件，都会报错（CI 上 `-Psubconv.strict=true` 时直接失败）。
+
+`0005-cmake-embed.patch` 给上游那份加的只有一件事：`SUBCONV_BUILD_CLI`（默认 `ON`），
+把 CLI 目标与 `install(TARGETS subconv)` 包起来。`OFF` 时上游只产出 `subconv_core`，
+`subconv` 这个名字空出来给 JNI 的 `libsubconv.so` 用；默认 `ON` 保证上游与桌面的构建行为
+一字不变（上游自己的 `build.sh` / `build.ps1` 都没提这个开关）。
 
 ## 与上游的功能差异（Android 构建）
 
@@ -119,6 +145,7 @@ Android 这份：只编 `subconv_core` 静态库 + `libsubconv.so`，内嵌 Web 
 | Clash YAML 订阅解析 | ✅ | 内置 yaml-cpp 0.8.0 |
 | `-k` 跳过 TLS 校验 | ⚠️ | 仅作用于抓订阅；Android 侧用信任所有的 TrustManager 实现 |
 | `--probe-cert` 证书指纹 | ✅ | 走 Java `SSLSocket` |
+| 链式代理（`?chain=` 前置 / `?chain_rear=` 后置；Web UI「前置代理」「后置代理」输入框） | ✅ | 纯 C++（`src/emit/chain.cpp`），与上游一致；`--chain` / `--chain-rear` 那两个 CLI 开关在 Android 上没有入口，等价能力走 HTTP 参数与 Web UI |
 | CLI 子命令（convert / version / --list-*） | ❌ | Android 上没有命令行入口 |
 | 磁盘缓存的默认目录 | ⚠️ | 由 JNI 注入 App 私有缓存目录（Android 的 `/tmp` 不可用） |
 

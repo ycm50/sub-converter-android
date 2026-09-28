@@ -1,0 +1,59 @@
+diff --git a/upstream.cmake b/upstream.cmake
+index 2dc2e84..f335c0f 100644
+--- a/upstream.cmake
++++ b/upstream.cmake
+@@ -16,6 +16,7 @@ if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+ endif()
+ 
+ option(SUBCONV_BUILD_TESTS    "构建单元测试" ON)
++option(SUBCONV_BUILD_CLI      "构建命令行程序（嵌入式移植可以关掉，只保留 subconv_core 供宿主链接）" ON)
+ option(SUBCONV_USE_CURL       "启用 libcurl 订阅抓取" ON)
+ option(SUBCONV_USE_OPENSSL    "启用 OpenSSL（--probe-cert 证书指纹探测）" ON)
+ option(SUBCONV_USE_YAML       "启用 yaml-cpp 解析 Clash 订阅" ON)
+@@ -384,17 +385,25 @@ endif()
+ 
+ # ---------------------------------------------------------------------------
+ # CLI
++#
++# SUBCONV_BUILD_CLI=OFF 让这个文件**只产出 subconv_core**：嵌入式移植（App / 库）
++# 只要那个静态库，而且它们通常根本没有 src/cli（连可编的命令行入口都没有）。
++# 关掉之后 "subconv" 这个名字就空出来了，宿主可以拿它命名自己的产物。
+ # ---------------------------------------------------------------------------
+-add_executable(subconv src/cli/main.cpp)
+-target_link_libraries(subconv PRIVATE subconv_core)
+-
+-# 把「二进制 + 可能的同级依赖」当成一个可搬运的目录：Linux 上给可执行文件加
+-# $ORIGIN 的 rpath —— 用户（或发行包）把 libyaml-cpp.so 之类放在 exe 旁边也能被找到，
+-# 同时不影响系统库的查找顺序。注意 $ORIGIN 在 CMake 里要转义。
+-if(UNIX)
+-  set_target_properties(subconv PROPERTIES
+-    BUILD_RPATH "\$ORIGIN"
+-    INSTALL_RPATH "\$ORIGIN")
++if(SUBCONV_BUILD_CLI)
++  add_executable(subconv src/cli/main.cpp)
++  target_link_libraries(subconv PRIVATE subconv_core)
++
++  # 把「二进制 + 可能的同级依赖」当成一个可搬运的目录：Linux 上给可执行文件加
++  # $ORIGIN 的 rpath —— 用户（或发行包）把 libyaml-cpp.so 之类放在 exe 旁边也能被找到，
++  # 同时不影响系统库的查找顺序。注意 $ORIGIN 在 CMake 里要转义。
++  if(UNIX)
++    set_target_properties(subconv PROPERTIES
++      BUILD_RPATH "\$ORIGIN"
++      INSTALL_RPATH "\$ORIGIN")
++  endif()
++else()
++  message(STATUS "CLI: 已按 SUBCONV_BUILD_CLI=OFF 关闭 -> 只产出 subconv_core")
+ endif()
+ 
+ # ---------------------------------------------------------------------------
+@@ -410,7 +419,9 @@ endif()
+ # ---------------------------------------------------------------------------
+ # 安装
+ # ---------------------------------------------------------------------------
+-install(TARGETS subconv RUNTIME DESTINATION bin)
++if(SUBCONV_BUILD_CLI)
++  install(TARGETS subconv RUNTIME DESTINATION bin)
++endif()
+ install(DIRECTORY data/ DESTINATION share/subconv/data OPTIONAL)
+ 
+ # 目标平台摘要：交叉编译 / 多架构发布会同时打好几个包，日志里能一眼看清这份产物是什么

@@ -629,6 +629,17 @@ Result<std::string> emit_sharelinks(const NodeList& nodes, const EmitOptions& op
   const NodeList prepared = prepare_nodes(nodes, opts);
   const bool v2rayn_mode = mode == ShareMode::V2rayN;
 
+  // 分享链接（ss:// vmess:// v2rayn:// …）里没有任何字段能表达「先走另一条出站」，
+  // 链路只能靠 clash / xray / singbox 三个整份配置目标。这里明确告警而不是装作没看见：
+  // 用户以为链上了、其实每条链接都是直连，是这个场景最危险的误解。
+  if ((!opts.chain.empty() || !opts.chain_rear.empty()) && warnings != nullptr) {
+    const std::string which = !opts.chain.empty() && !opts.chain_rear.empty()
+                                  ? "--chain / --chain-rear"
+                                  : (opts.chain.empty() ? "--chain-rear" : "--chain");
+    warnings->push_back("分享链接格式（links / base64 / v2rayn）没有链式代理字段，" + which +
+                        " 已忽略：需要链路请用 -t clash / -t xray / -t singbox");
+  }
+
   // 按协议汇总被跳过的节点，避免一个节点一条告警
   struct Skipped {
     int count = 0;

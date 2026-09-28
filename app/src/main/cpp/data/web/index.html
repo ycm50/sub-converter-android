@@ -267,6 +267,38 @@
             <input id="opt-retries" type="number" min="0" placeholder="2">
           </label>
         </div>
+
+        <!-- 链式代理：每行一项 -->
+        <div class="rulesets" id="chainblock">
+          <div class="rulesets-head">
+            <b>前置代理</b> · 每行一项，<b>上面的在前</b>，产物是
+            <code>本地 -&gt; 第 1 项 -&gt; 第 2 项 -&gt; … -&gt; 每个节点</code>。
+            每项可以是一条<b>分享链接</b>（ss:// vmess:// vless:// trojan:// socks5:// http:// …），
+            也可以是<b>订阅里某个节点的名字</b>（可写 <code>@名字</code>）。<br>
+            <b>后置代理</b>接在节点后面：产物变成
+            <code>本地 -&gt; … -&gt; 每个节点 -&gt; 第 1 项 -&gt; … -&gt; 目标</code>。
+            链路字段的含义是「本出站经谁出去」，所以<b>流量落点会变成后置列表的末尾</b>
+            —— 末尾出站的名字写成 <code>节点 -&gt; 后置</code>，<b>节点自己不改名</b>，
+            照旧直连（或接在前置链路后面）。于是客户端里选中
+            <code>节点 -&gt; 后置</code> 得到的就是
+            <code>本地 -&gt; 节点 -&gt; 后置 -&gt; 目标</code>（即拿节点当入口、拿后置当出口）。
+            后置<b>每个节点都会克隆一份</b>（第 1 跳必须经各自的节点出去），
+            所以 N 个节点配 m 跳会多出 N×m 个出站。<br>
+            落点：Xray 的 <code>sockopt.dialerProxy</code> / Clash 的 <code>dialer-proxy</code> /
+            sing-box 的 <code>detour</code>；<b>链接类目标（v2rayNG 链接 / 订阅 / 完整）没有该字段，
+            会告警并忽略</b>。<br>
+            链路是按 TCP 建的隧道：凡是「经隧道被拨到」的那一跳（前置链路下的节点、后置链路的每一跳）
+            若是 <b>hysteria2 / tuic / wireguard</b> 或 quic / kcp 传输就连不通（转换时会告警）。
+          </div>
+          <label class="field">前置代理（一行一项，最外侧在前）
+            <textarea id="opt-chain" rows="3" spellcheck="false"
+              placeholder="socks5://user:pass@10.0.0.1:1080&#10;@香港 中转 01"></textarea>
+          </label>
+          <label class="field">后置代理（一行一项，最内侧在前）
+            <textarea id="opt-chain-rear" rows="3" spellcheck="false"
+              placeholder="@落地 出口 01&#10;trojan://pass@exit.example.com:443"></textarea>
+          </label>
+        </div>
       </div>
     </details>
 
@@ -470,6 +502,21 @@
       .catch(function () { /* 拿不到目录就不显示，仍按服务端默认写 nameserver */ });
   }
 
+  /** 链路输入框：一行一项。前置按「最外侧 -> 最内侧」，后置按「最内侧 -> 最外侧」。 */
+  function linesOf(id) {
+    return $(id).value.split(/\r?\n/)
+      .map(function (line) { return line.trim(); })
+      .filter(function (line) { return line !== ""; });
+  }
+
+  function selectedChain() {
+    return linesOf("opt-chain");
+  }
+
+  function selectedChainRear() {
+    return linesOf("opt-chain-rear");
+  }
+
   function collectOptions() {
     var options = {
       emoji: $("opt-emoji").checked,
@@ -485,6 +532,10 @@
     // 目录没加载成功时留空（JSON.stringify 会丢掉 undefined 键）→ 用服务端默认
     if (RULESET_IDS !== null) options.rulesets = selectedRuleSets();
     if (DNS_IDS !== null) options.dns = selectedDns();
+    var chain = selectedChain();
+    if (chain.length) options.chain = chain;
+    var chainRear = selectedChainRear();
+    if (chainRear.length) options.chain_rear = chainRear;
     return options;
   }
 
@@ -608,6 +659,13 @@
     if (!payload.options.ipv6) params.push("ipv6=false");
     if (payload.options.clash_legacy) params.push("clash_legacy=true");
     if (payload.options.probe_cert) params.push("probe_cert=true");
+    // 链式代理：重复的 chain / chain_rear 参数，顺序就是链路顺序（服务端按出现顺序收集）
+    (payload.options.chain || []).forEach(function (item) {
+      params.push("chain=" + encodeURIComponent(item));
+    });
+    (payload.options.chain_rear || []).forEach(function (item) {
+      params.push("chain_rear=" + encodeURIComponent(item));
+    });
     if (payload.filename) params.push("filename=" + encodeURIComponent(payload.filename));
     // 显式带上规则集/DNS，链接才能复现界面上的选择（空串 = 只留 MATCH / 不写 nameserver）
     if (payload.options.rulesets) {
@@ -742,6 +800,8 @@
       if (saved.name) $("opt-name").value = saved.name;
       if (saved.proxy) $("opt-proxy").value = saved.proxy;
       if (saved.ua) $("opt-ua").value = saved.ua;
+      if (saved.chain) $("opt-chain").value = saved.chain;
+      if (saved.chain_rear) $("opt-chain-rear").value = saved.chain_rear;
     }
   } catch (e) { /* localStorage 不可用时忽略 */ }
 
@@ -755,7 +815,9 @@
         dns: DNS_IDS === null ? undefined : selectedDns(),
         name: $("opt-name").value,
         proxy: $("opt-proxy").value,
-        ua: $("opt-ua").value
+        ua: $("opt-ua").value,
+        chain: $("opt-chain").value,
+        chain_rear: $("opt-chain-rear").value
       }));
     } catch (e) { /* ignore */ }
   });
@@ -788,6 +850,24 @@
     if (params.get("filename")) $("opt-name").value = params.get("filename");
     if (params.get("proxy")) $("opt-proxy").value = params.get("proxy");
     if (params.get("ua")) $("opt-ua").value = params.get("ua");
+    // 链路可以从链接预填：?chain=...&chain=...（前置，重复出现即链路顺序）与
+    // ?chain_rear=...&chain_rear=...（后置），两者也都接受 | 分隔
+    function fillChainFromQuery(names, id) {
+      var lines = [];
+      var hit = false;
+      names.forEach(function (name) {
+        if (!params.has(name)) return;
+        hit = true;
+        params.getAll(name).forEach(function (value) {
+          value.split("|").forEach(function (item) {
+            if (item.trim()) lines.push(item.trim());
+          });
+        });
+      });
+      if (hit) $(id).value = lines.join("\n");
+    }
+    fillChainFromQuery(["chain", "front_proxy"], "opt-chain");
+    fillChainFromQuery(["chain_rear", "rear_chain", "rear_proxy"], "opt-chain-rear");
 
     syncRulesetsVisibility();
     if (params.get("auto") === "1") run();
